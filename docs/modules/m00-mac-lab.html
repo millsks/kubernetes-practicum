@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M00 · Your Mac Lab: Colima and kind · Kubernetes Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/kubelab-src.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-k8s.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m00">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Orientation · Module 00</p>
+    <h1>Your Mac Lab: Colima and kind</h1>
+    <p class="lede">Every lab in this course runs on a real Kubernetes cluster on your MacBook. This module builds
+      that lab: a small Linux VM (Colima), a Docker engine inside it, and a three-node cluster made of containers
+      (kind). Along the way you'll learn exactly where Docker stops and containerd starts, which explains half the
+      "it works on my laptop" puzzles you'll meet later.</p>
+    <div class="lesson-meta"><span>⏱ ~1.5 hours</span><span>Prerequisites: a Mac with Homebrew, comfort in a terminal</span></div>
+    <ul class="objectives">
+      <li>Explain how this practicum works: lessons, graded exercises, labs, and grading with Pixi</li>
+      <li>Install the toolchain and start a Colima VM sized for the whole course</li>
+      <li>Explain why kind needs Docker but your Pods run on containerd, and move an image between them</li>
+      <li>Write a kind cluster config with two workers and a port mapping, and validate it before using it</li>
+      <li>Create, inspect, pause, and delete the <code>primer</code> cluster</li>
+      <li>Fix the most common local-cluster problems: inotify limits, memory, and port clashes</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="how-it-works">
+    <h2>How this practicum works</h2>
+    <p>Each module has four parts. You <strong>read</strong> an explanation with diagrams, tables, and small
+      Python cells that run in your browser. You <strong>practice</strong> with graded exercises in the page. You
+      <strong>build</strong> in a lab on your own machine. Then you <strong>check</strong> yourself with a quiz.</p>
+    <div class="card-grid">
+      <div class="card"><h4>Python in the page</h4><p>Cells run real CPython (Pyodide) in your browser. They use
+        <code>kubelab</code>, a small library that reads YAML manifests, parses quantities like <code>128Mi</code>,
+        matches label selectors, and validates objects the way the API server would. It never talks to a cluster.</p></div>
+      <div class="card"><h4>Labs on your Mac</h4><p>Labs live in the <code>kubernetes-practicum</code> repository.
+        <code>pixi run start m00-lab1</code> copies a starter into <code>work/</code>; you edit it;
+        <code>pixi run grade m00-lab1</code> checks it.</p></div>
+      <div class="card"><h4>No answer key</h4><p>Labs ship <strong>without solutions</strong>. The checks are the
+        specification, and the repository's CI proves every untouched starter fails, so a pass means you built it.</p></div>
+      <div class="card"><h4>Live checks</h4><p>Most checks are offline and run in seconds. Optional live checks
+        (<code>pixi run grade-live &lt;lab&gt;</code>) apply your work to your kind cluster and wait for it to be
+        healthy.</p></div>
+    </div>
+    <pre data-label="Terminal"><code class="language-bash">git clone https://github.com/millsks/kubernetes-practicum.git
+cd kubernetes-practicum
+pixi install            # Python 3.14, kubelab, kubectl and helm (conda-forge)
+pixi run serve          # this site at http://127.0.0.1:8000/
+pixi run labs           # list labs and whether you've started them</code></pre>
+    <aside class="callout tip"><p><strong>Remember:</strong> read and try in the page, build in a lab, grade with
+      Pixi. A green grade is the only "done" that counts.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="toolchain">
+    <h2>The toolchain</h2>
+    <p>You need a handful of tools. Homebrew installs the ones that talk to macOS; Pixi installs the ones the course
+      checks rely on, pinned to versions that are tested together.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Tool</th><th>What it does</th><th>Install with</th></tr></thead>
+      <tbody>
+        <tr><td><code>colima</code></td><td>Runs a small Linux VM using Apple's Virtualization.framework, with a Docker engine inside</td><td>Homebrew</td></tr>
+        <tr><td><code>docker</code> (CLI only)</td><td>Talks to Colima's Docker engine; builds images</td><td>Homebrew</td></tr>
+        <tr><td><code>kind</code></td><td>Kubernetes IN Docker: each cluster node is a container</td><td>Homebrew</td></tr>
+        <tr><td><code>kubectl</code></td><td>The Kubernetes command-line client</td><td>Pixi (Apple Silicon); Homebrew on Intel Macs</td></tr>
+        <tr><td><code>helm</code></td><td>Kubernetes package manager (from Stage 3)</td><td>Pixi</td></tr>
+        <tr><td><code>k9s</code></td><td>Terminal UI that shows the cluster live</td><td>Homebrew (optional)</td></tr>
+      </tbody>
+    </table></div>
+    <pre data-label="Terminal"><code class="language-bash">brew install colima docker kind k9s
+# Docker Desktop is not needed. If it's installed, quit it so only one engine runs.</code></pre>
+    <aside class="callout pixi"><p>Inside the repository, run tools through Pixi so you get the tested versions:
+      <code>pixi run kubectl get nodes</code>, or open a shell with them on your PATH using <code>pixi shell</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="colima">
+    <h2>Colima: a Linux machine inside your Mac</h2>
+    <p>Containers are a Linux feature: they're ordinary processes that the Linux kernel isolates with
+      <strong>namespaces</strong> (what a process can see) and <strong>cgroups</strong> (how much CPU and memory it
+      may use). macOS has a different kernel, so to run Linux containers you need a Linux kernel somewhere. Colima
+      starts a lightweight Linux virtual machine and runs a Docker engine in it. Your <code>docker</code> CLI on
+      macOS sends commands into that VM.</p>
+    <pre data-label="Terminal"><code class="language-bash">colima start --cpu 4 --memory 8 --disk 60 --vm-type vz --mount-type virtiofs
+docker context use colima
+docker info --format '{{.ServerVersion}} {{.Architecture}}'</code></pre>
+    <div class="scroll"><table>
+      <thead><tr><th>Flag</th><th>Why this value</th></tr></thead>
+      <tbody>
+        <tr><td><code>--cpu 4</code></td><td>Three nodes plus the system Pods; four cores keeps rollouts snappy</td></tr>
+        <tr><td><code>--memory 8</code></td><td>Enough for every stage, including Prometheus and Grafana in Stage 4. 6 GB is fine for Stages 1–2</td></tr>
+        <tr><td><code>--disk 60</code></td><td>Images and volumes add up; the disk grows only as it's used</td></tr>
+        <tr><td><code>--vm-type vz</code></td><td>Apple's native hypervisor: faster and lighter than QEMU</td></tr>
+        <tr><td><code>--mount-type virtiofs</code></td><td>Fast file sharing between macOS and the VM</td></tr>
+      </tbody>
+    </table></div>
+    <aside class="callout note"><p>On an Apple Silicon Mac the VM is <strong>arm64</strong>, so nodes, Pods, and
+      the images you build are arm64 too. Every image in this course is multi-architecture. For an amd64-only
+      image, restart Colima with <code>--vz-rosetta</code> and pull with <code>--platform linux/amd64</code>.</p></aside>
+    <aside class="callout think"><p>Colima stops when your Mac sleeps or restarts. Before you read on: what do you
+      expect happens to your kind cluster then? (The answer is in <a href="#lifecycle">Day to day</a>.)</p></aside>
+  </section>
+
+  <section class="lesson-section" id="runtimes">
+    <h2>Docker vs containerd: who runs what</h2>
+    <p>This setup has two container runtimes, and they work at different layers. Getting this straight now saves
+      hours later.</p>
+    <figure class="figure">
+      <svg class="diagram" viewBox="0 0 760 250" role="img" aria-label="Docker creates node containers; inside each node kubelet talks to containerd">
+        <rect x="10" y="10" width="740" height="230" rx="10" fill="none" stroke="var(--fg-muted)" stroke-dasharray="5 4"/>
+        <text x="24" y="30" font-size="13" font-weight="600" fill="var(--fg-muted)">Colima VM (Linux)</text>
+        <rect x="30" y="60" width="170" height="60" rx="8" fill="var(--fg)" />
+        <text x="115" y="86" text-anchor="middle" font-size="14" font-weight="700" fill="var(--bg)">Docker engine</text>
+        <text x="115" y="104" text-anchor="middle" font-size="11" fill="var(--bg)">docker build · kind create</text>
+        <rect x="240" y="40" width="495" height="185" rx="10" fill="var(--bg-sunk)" stroke="var(--border-strong)"/>
+        <text x="254" y="60" font-size="13" font-weight="600" fill="var(--fg)">kind node container (e.g. primer-worker)</text>
+        <rect x="260" y="80" width="140" height="50" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="330" y="102" text-anchor="middle" font-size="13" fill="var(--fg)">kubelet</text>
+        <text x="330" y="119" text-anchor="middle" font-size="11" fill="var(--fg-muted)">node agent</text>
+        <rect x="430" y="80" width="140" height="50" rx="8" fill="var(--accent)"/>
+        <text x="500" y="102" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent-fg)">containerd</text>
+        <text x="500" y="119" text-anchor="middle" font-size="11" fill="var(--accent-fg)">CRI runtime</text>
+        <rect x="600" y="74" width="115" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="657" y="94" text-anchor="middle" font-size="12" fill="var(--fg)">Pod A</text>
+        <rect x="600" y="112" width="115" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="657" y="132" text-anchor="middle" font-size="12" fill="var(--fg)">Pod B</text>
+        <rect x="430" y="160" width="140" height="50" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="500" y="182" text-anchor="middle" font-size="13" fill="var(--fg)">image store</text>
+        <text x="500" y="199" text-anchor="middle" font-size="11" fill="var(--fg-muted)">kind load lands here</text>
+        <line x1="200" y1="90" x2="238" y2="90" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="400" y1="105" x2="428" y2="105" stroke="var(--accent)" stroke-width="2"/>
+        <line x1="570" y1="95" x2="598" y2="90" stroke="var(--accent)" stroke-width="2"/>
+        <line x1="570" y1="112" x2="598" y2="126" stroke="var(--accent)" stroke-width="2"/>
+        <line x1="500" y1="130" x2="500" y2="158" stroke="var(--fg-muted)" stroke-width="1.5"/>
+        <text x="415" y="148" text-anchor="middle" font-size="11" fill="var(--fg-muted)">CRI (gRPC)</text>
+      </svg>
+      <figcaption>Docker is only the "hardware" for kind. Kubernetes never talks to Docker: since v1.24 removed
+        dockershim, the kubelet uses the Container Runtime Interface (CRI), and kind nodes run containerd.</figcaption>
+    </figure>
+    <div class="scroll"><table>
+      <thead><tr><th>Question</th><th>Docker (in Colima)</th><th>containerd (in each kind node)</th></tr></thead>
+      <tbody>
+        <tr><td>Who talks to it?</td><td>You (<code>docker</code>) and <code>kind</code></td><td>The kubelet, over CRI</td></tr>
+        <tr><td>What does it run?</td><td>The node containers <code>primer-control-plane</code>, <code>primer-worker</code>…</td><td>Your Pods' containers</td></tr>
+        <tr><td>Where do its images live?</td><td>Colima's Docker image store</td><td>Each node's own store</td></tr>
+        <tr><td>How do images move?</td><td><code>kind load docker-image NAME:TAG</code> copies them into every node</td><td>Or each node pulls from a registry itself</td></tr>
+        <tr><td>Inspect it with</td><td><code>docker ps</code>, <code>docker images</code></td><td><code>docker exec -it primer-worker crictl ps</code></td></tr>
+      </tbody>
+    </table></div>
+    <p>The practical consequence: an image you <code>docker build</code> on your Mac is <em>invisible</em> to your
+      Pods until you <code>kind load</code> it (or push it to a registry the nodes can reach). A Pod that can't find
+      its image goes into <code>ErrImagePull</code>, then <code>ImagePullBackOff</code>. You'll diagnose exactly that
+      in M02.</p>
+    <aside class="callout warn"><p>Use a pinned tag such as <code>myapp:0.1.0</code> for images you load, and
+      <code>imagePullPolicy: IfNotPresent</code>. With the tag <code>:latest</code>, Kubernetes defaults to
+      <code>Always</code> and tries to pull from Docker Hub, ignoring the copy you loaded.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="kind-config">
+    <h2>A kind cluster config</h2>
+    <p>kind reads a small YAML file that describes the nodes. The course's <code>primer</code> cluster has one
+      control-plane node and two workers, and publishes one port from the control-plane node to your Mac.</p>
+    <pre><code class="language-yaml"># kind-primer.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: primer
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080   # a NodePort inside the cluster (used from Stage 2)
+        hostPort: 8080         # http://*.localhost:8080 on your Mac
+        protocol: TCP
+  - role: worker
+  - role: worker</code></pre>
+    <p>Why three nodes on one laptop? Because scheduling, spreading replicas, draining a node, and "a node died"
+      only mean something with more than one node. Each node is a container, so they're cheap.</p>
+    <p>Before you create a cluster, check the file. <code>kubelab.check_kind_config</code> returns a list of
+      problems; an empty list means the file is valid. Try breaking it: change <code>worker</code> to
+      <code>workers</code>, or give two mappings the same <code>hostPort</code>.</p>
+    <div class="runnable" data-title="Validate a kind config">
+<textarea>
+import kubelab
+
+text = """
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: primer
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - {containerPort: 30080, hostPort: 8080, protocol: TCP}
+  - role: worker
+  - role: worker
+"""
+config = kubelab.load_manifests(text)[0]
+print("problems:", kubelab.check_kind_config(config))
+print("roles:   ", kubelab.node_roles(config))
+for m in kubelab.port_mappings(config):
+    print(f"localhost:{m.host_port} -> {m.role} node port {m.container_port}/{m.protocol}")
+</textarea>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="create">
+    <h2>Create the primer cluster</h2>
+    <pre data-label="Terminal"><code class="language-bash">kind create cluster --config kind-primer.yaml
+kubectl cluster-info --context kind-primer
+kubectl get nodes -o wide            # 1 control-plane + 2 workers, all Ready
+docker ps --format '{{.Names}}'      # the nodes are just containers</code></pre>
+    <p><code>kind create cluster</code> does four things: it starts one Docker container per node from the
+      <code>kindest/node</code> image (which bundles systemd, containerd, the kubelet, and kubeadm); it runs
+      <code>kubeadm init</code> on the control plane and <code>kubeadm join</code> on the workers; it installs a
+      network plugin (kindnet) and a storage provisioner; and it adds a <strong>context</strong> named
+      <code>kind-primer</code> to <code>~/.kube/config</code> and switches to it.</p>
+    <p>A context is a named pairing of a cluster, a user, and a default namespace. <code>kubectl</code> always talks
+      to the current context, which matters as soon as you have more than one cluster.</p>
+    <pre data-label="Terminal"><code class="language-bash">kubectl config get-contexts           # * marks the current one
+kubectl config use-context kind-primer
+kind get clusters</code></pre>
+    <aside class="callout tip"><p><strong>Remember:</strong> if <code>kubectl</code> suddenly shows the wrong
+      cluster (or none), check <code>kubectl config current-context</code> first.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="ports">
+    <h2>How traffic reaches the cluster</h2>
+    <p>The port mapping is a chain of three hops. Seeing it now makes Stage 2's networking much easier.</p>
+    <pre class="mermaid">
+flowchart LR
+  B[Browser or curl on your Mac] -->|localhost:8080| C[Colima port forward]
+  C -->|VM port 8080| D[Docker publishes to primer-control-plane]
+  D -->|node port 30080| S[A NodePort Service in the cluster]
+  S --> P[Pods]
+    </pre>
+    <p>Until something in the cluster listens on NodePort 30080 (the gateway you install in Stage 2),
+      <code>localhost:8080</code> refuses connections. That's expected. Any name ending in <code>.localhost</code>
+      resolves to your own machine in curl and in browsers, so later you'll use names like
+      <code>http://podinfo.localhost:8080</code> with no <code>/etc/hosts</code> edits.</p>
+  </section>
+
+  <section class="lesson-section" id="lifecycle">
+    <h2>Day to day and troubleshooting</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Goal</th><th>Command</th></tr></thead>
+      <tbody>
+        <tr><td>Pause everything (keeps the cluster)</td><td><code>colima stop</code>, later <code>colima start</code>: the node containers restart with it</td></tr>
+        <tr><td>Delete the cluster</td><td><code>kind delete cluster --name primer</code></td></tr>
+        <tr><td>Recreate from scratch</td><td>delete, then <code>kind create cluster --config kind-primer.yaml</code></td></tr>
+        <tr><td>Repair a missing kubeconfig entry</td><td><code>kind export kubeconfig --name primer</code></td></tr>
+        <tr><td>Watch the cluster live</td><td><code>k9s</code> (type <code>:pods</code>, press <code>0</code> for all namespaces)</td></tr>
+        <tr><td>Collect node logs for a bug report</td><td><code>kind export logs ./kind-logs --name primer</code></td></tr>
+      </tbody>
+    </table></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>Nodes flap <code>NotReady</code>; logs say <code>too many open files</code></td><td>inotify limits in the VM are too low for several nodes</td><td><code>colima ssh -- sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512</code></td></tr>
+        <tr><td><code>Cannot connect to the Docker daemon</code></td><td>Colima isn't running, or another context is active</td><td><code>colima status</code>; <code>docker context use colima</code></td></tr>
+        <tr><td>Pods <code>Pending</code>; events say <code>Insufficient memory</code></td><td>The VM is too small</td><td><code>colima stop && colima start --memory 10</code></td></tr>
+        <tr><td><code>kind create</code> fails: port 8080 is in use</td><td>Another app on your Mac owns it</td><td>Free it, or change <code>hostPort</code> and recreate</td></tr>
+        <tr><td><code>ErrImagePull</code> for an image you built</td><td>It's in Docker, not in the nodes' containerd</td><td><code>kind load docker-image NAME:TAG --name primer</code></td></tr>
+      </tbody>
+    </table></div>
+    <aside class="callout note"><p>The answer to the earlier question: when Colima stops, the node containers stop
+      with it. <code>colima start</code> brings them back and the cluster resumes with its objects intact, because
+      etcd's data lives on the control-plane container's disk.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Four short exercises on cluster configs and images. Each one uses <code>kubelab</code> or plain Python.</p>
+
+    <div class="exercise" data-id="m00-e1" data-title="Count the nodes">
+      <div class="exercise-prompt">
+        <p>Write <code>node_counts(yaml_text)</code> that parses a kind config and returns a dict with the number
+          of <code>"control-plane"</code> and <code>"worker"</code> nodes. A config with no <code>nodes</code> list
+          has one control-plane node. Use <code>kubelab.load_manifests</code> and <code>kubelab.node_roles</code>.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def node_counts(yaml_text):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def test_primer():
+    text = "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n- role: control-plane\n- role: worker\n- role: worker\n"
+    assert node_counts(text) == {"control-plane": 1, "worker": 2}, "one control plane, two workers"
+
+def test_default_single_node():
+    text = "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\n"
+    assert node_counts(text) == {"control-plane": 1, "worker": 0}, "no nodes list means one control-plane node"
+
+def test_ha():
+    text = "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n- role: control-plane\n- role: control-plane\n- role: control-plane\n- role: worker\n"
+    assert node_counts(text) == {"control-plane": 3, "worker": 1}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Parse with <code>kubelab.load_manifests(text)[0]</code>, then
+        count the roles from <code>kubelab.node_roles(config)</code>. Start both counts at zero.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def node_counts(yaml_text):
+    config = kubelab.load_manifests(yaml_text)[0]
+    roles = kubelab.node_roles(config)
+    return {"control-plane": roles.count("control-plane"), "worker": roles.count("worker")}</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m00-e2" data-title="Which URL reaches a NodePort?">
+      <div class="exercise-prompt">
+        <p>Write <code>url_for(config, node_port, host="localhost")</code> that returns the URL on your Mac that
+          reaches <code>node_port</code>, such as <code>"http://localhost:8080"</code>, using the config's
+          <code>extraPortMappings</code>. Return <code>None</code> when no TCP mapping publishes that port.
+          <code>config</code> is already a dict.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def url_for(config, node_port, host="localhost"):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+CONFIG = {"kind": "Cluster", "apiVersion": "kind.x-k8s.io/v1alpha4", "nodes": [
+    {"role": "control-plane", "extraPortMappings": [
+        {"containerPort": 30080, "hostPort": 8080},
+        {"containerPort": 30053, "hostPort": 5353, "protocol": "UDP"}]},
+    {"role": "worker"}]}
+
+def test_mapped():
+    assert url_for(CONFIG, 30080) == "http://localhost:8080"
+
+def test_custom_host():
+    assert url_for(CONFIG, 30080, host="podinfo.localhost") == "http://podinfo.localhost:8080"
+
+def test_unmapped_or_udp():
+    assert url_for(CONFIG, 31000) is None, "nothing publishes 31000"
+    assert url_for(CONFIG, 30053) is None, "a UDP mapping can't serve HTTP"
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Loop over <code>kubelab.port_mappings(config)</code>; each item
+        has <code>container_port</code>, <code>host_port</code>, and <code>protocol</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def url_for(config, node_port, host="localhost"):
+    for m in kubelab.port_mappings(config):
+        if m.container_port == node_port and m.protocol == "TCP":
+            return f"http://{host}:{m.host_port}"
+    return None</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m00-e3" data-title="Does this image need kind load?">
+      <div class="exercise-prompt">
+        <p>Write <code>needs_load(image, docker_images, node_images)</code>. It returns <code>True</code> when the
+          image exists in Docker (on your Mac's side) but is missing from at least one node's containerd store, so
+          <code>kind load</code> is required. <code>node_images</code> maps each node name to the set of images it has.
+          If the image isn't in Docker at all, return <code>False</code> (there's nothing to load; build or pull it first).</p>
+      </div>
+<textarea class="starter">
+def needs_load(image, docker_images, node_images):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+NODES = {"primer-control-plane": {"busybox:1.36"}, "primer-worker": {"busybox:1.36", "app:0.1.0"}, "primer-worker2": {"busybox:1.36"}}
+
+def test_missing_on_some_nodes():
+    assert needs_load("app:0.1.0", {"app:0.1.0"}, NODES) is True
+
+def test_everywhere_already():
+    assert needs_load("busybox:1.36", {"busybox:1.36"}, NODES) is False
+
+def test_not_in_docker():
+    assert needs_load("app:0.2.0", {"app:0.1.0"}, NODES) is False, "build the image before you can load it"
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Two conditions: the image is in <code>docker_images</code>, and
+        <code>any(image not in imgs for imgs in node_images.values())</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def needs_load(image, docker_images, node_images):
+    if image not in docker_images:
+        return False
+    return any(image not in images for images in node_images.values())</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m00-e4" data-title="Ready for the primer cluster?">
+      <div class="exercise-prompt">
+        <p>Write <code>primer_gaps(yaml_text)</code> that returns a list of what's missing for the course's cluster.
+          Start with every problem from <code>kubelab.check_kind_config</code>, then add these exact messages when they
+          apply: <code>"name must be primer"</code>, <code>"need exactly 2 workers"</code>, and
+          <code>"map node port 30080 to host port 8080"</code> (a TCP mapping on a control-plane node). A perfect
+          config returns <code>[]</code>.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def primer_gaps(yaml_text):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+GOOD = """kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: primer
+nodes:
+- role: control-plane
+  extraPortMappings: [{containerPort: 30080, hostPort: 8080}]
+- role: worker
+- role: worker
+"""
+
+def test_good():
+    assert primer_gaps(GOOD) == []
+
+def test_single_node_default():
+    gaps = primer_gaps("kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\n")
+    assert gaps == ["name must be primer", "need exactly 2 workers", "map node port 30080 to host port 8080"]
+
+def test_mapping_on_worker_does_not_count():
+    text = GOOD.replace("- role: control-plane\n  extraPortMappings: [{containerPort: 30080, hostPort: 8080}]\n- role: worker", "- role: control-plane\n- role: worker\n  extraPortMappings: [{containerPort: 30080, hostPort: 8080}]")
+    assert primer_gaps(text) == ["map node port 30080 to host port 8080"]
+
+def test_reports_kubelab_problems_first():
+    gaps = primer_gaps(GOOD.replace("kind: Cluster", "kind: Clutser"))
+    assert gaps[0] == "kind: must be 'Cluster'"
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Build the list in the order the prompt gives. For the mapping,
+        look for a <code>PortMapping</code> with <code>role == "control-plane"</code>, container port 30080, host
+        port 8080, and protocol TCP.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def primer_gaps(yaml_text):
+    config = kubelab.load_manifests(yaml_text)[0]
+    gaps = list(kubelab.check_kind_config(config))
+    if config.get("name") != "primer":
+        gaps.append("name must be primer")
+    if kubelab.node_roles(config).count("worker") != 2:
+        gaps.append("need exactly 2 workers")
+    wanted = kubelab.PortMapping("control-plane", 30080, 8080, "TCP")
+    if wanted not in kubelab.port_mappings(config):
+        gaps.append("map node port 30080 to host port 8080")
+    return gaps</code></pre></details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Lab: the primer cluster</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Lab m00-lab1</span><span class="w-title">Build, check, and create your cluster</span></div>
+      <div class="widget-body">
+        <p>Write the <code>kind-primer.yaml</code> you'll use for the whole course, answer a few questions about the
+          two runtimes, then create the cluster. The offline checks validate your config and answers; the live check
+          confirms the cluster exists, has three Ready nodes, and runs containerd.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi run start m00-lab1
+# edit work/m00-lab1/kind-primer.yaml and work/m00-lab1/answers.toml
+pixi run grade m00-lab1
+kind create cluster --config work/m00-lab1/kind-primer.yaml
+pixi run grade-live m00-lab1   # optional: checks the running cluster</code></pre>
+        <ul class="checklist" data-id="m00-lab1">
+          <li>Colima runs with at least 4 CPUs and 6 GB of memory</li>
+          <li><code>kind-primer.yaml</code> passes <code>kubelab.check_kind_config</code></li>
+          <li>One control-plane node, two workers, cluster name <code>primer</code></li>
+          <li>Node port 30080 is mapped to host port 8080 over TCP on the control plane</li>
+          <li><code>answers.toml</code> is complete</li>
+          <li><code>pixi run grade m00-lab1</code> passes</li>
+        </ul>
+        <p><strong>Stretch:</strong> create a second, single-node cluster called <code>scratch</code>, switch between
+          the two contexts, then delete it.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m00-quiz">
+<script type="application/json">
+{"title": "Your Mac Lab quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Why does a Mac need Colima (or a similar VM) to run Linux containers?", "options": ["macOS forbids containers", "Containers are isolated Linux processes, so they need a Linux kernel", "kind only runs in the cloud", "Docker is Linux-only software"], "answer": 1, "explanation": "<p>Containers rely on Linux kernel features (namespaces and cgroups). Colima provides a Linux kernel in a lightweight VM.</p>"},
+  {"type": "single", "prompt": "In this setup, which runtime runs your Pods' containers?", "options": ["Docker in Colima", "containerd inside each kind node", "Apple Virtualization.framework", "runc on macOS"], "answer": 1, "explanation": "<p>The kubelet talks CRI to containerd inside each node. Docker only runs the node containers themselves.</p>"},
+  {"type": "single", "prompt": "You built <code>app:0.1.0</code> with <code>docker build</code>, and the Pod shows <code>ErrImagePull</code>. What's the fastest fix?", "options": ["Restart Colima", "<code>kind load docker-image app:0.1.0 --name primer</code>", "Set <code>imagePullPolicy: Always</code>", "Delete the namespace"], "answer": 1, "explanation": "<p>The image is in Docker's store, not the nodes' containerd stores. <code>kind load</code> copies it into every node.</p>"},
+  {"type": "single", "prompt": "Why avoid the tag <code>:latest</code> for an image you <code>kind load</code>?", "options": ["kind rejects it", "With <code>:latest</code> the default pull policy is <code>Always</code>, so the node tries the registry and ignores your loaded copy", "It's slower to load", "containerd doesn't support tags"], "answer": 1, "explanation": "<p>Pinned tags default to <code>IfNotPresent</code>, which uses the loaded image.</p>"},
+  {"type": "multi", "prompt": "What does <code>kind create cluster</code> do?", "options": ["Starts one container per node", "Runs kubeadm to bootstrap the control plane and join workers", "Installs a CNI (kindnet) and a storage provisioner", "Adds a <code>kind-&lt;name&gt;</code> context to your kubeconfig", "Installs Docker Desktop"], "answer": [0, 1, 2, 3], "explanation": "<p>Everything except Docker Desktop: kind uses whatever Docker-compatible engine is active, here Colima's.</p>"},
+  {"type": "single", "prompt": "What does <code>extraPortMappings: [{containerPort: 30080, hostPort: 8080}]</code> on the control-plane node do?", "options": ["Opens port 8080 on every Pod", "Publishes the node container's port 30080 as port 8080 on the host", "Creates a Service", "Changes the API server's port"], "answer": 1, "explanation": "<p>It's a Docker port mapping on the node container. Colima forwards it to your Mac, and a NodePort Service on 30080 then answers at localhost:8080.</p>"},
+  {"type": "single", "prompt": "Nodes keep flapping NotReady and the logs say <code>too many open files</code>. What's the fix?", "options": ["Give Colima more disk", "Raise <code>fs.inotify</code> limits inside the VM", "Use fewer Pods", "Upgrade kubectl"], "answer": 1, "explanation": "<p>Each node runs many file watchers. Raise <code>max_user_watches</code> and <code>max_user_instances</code>.</p>"},
+  {"type": "single", "prompt": "Which command pauses your lab without losing the cluster?", "options": ["<code>kind delete cluster</code>", "<code>colima stop</code>", "<code>docker system prune</code>", "<code>kubectl drain --all</code>"], "answer": 1, "explanation": "<p>Stopping the VM stops the node containers; <code>colima start</code> brings them back with their state.</p>"},
+  {"type": "text", "prompt": "Which CLI, run inside a kind node with <code>docker exec</code>, lists the containers containerd is running?", "answer": ["crictl"], "explanation": "<p><code>crictl</code> is the CRI debugging client. <code>crictl ps</code> lists containers and <code>crictl images</code> lists images.</p>"},
+  {"type": "single", "prompt": "<code>kubectl</code> suddenly shows a different cluster. What do you check first?", "options": ["Your Docker images", "<code>kubectl config current-context</code>", "The inotify limits", "The Pixi lock file"], "answer": 1, "explanation": "<p>kubectl always uses the current context. Switch with <code>kubectl config use-context kind-primer</code>.</p>"},
+  {"type": "single", "prompt": "Why does the course cluster have two workers instead of one node?", "options": ["kind requires it", "Scheduling, spreading replicas, draining, and node failure only mean something with several nodes", "To use more memory", "Workers are faster than the control plane"], "answer": 1, "explanation": "<p>Many lessons in Stages 1 and 3 need more than one place for Pods to run.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>Read and try in the page, build in a lab, grade with Pixi. Labs have no answer key.</li>
+      <li>Colima gives your Mac a Linux kernel and a Docker engine. Size it at 4 CPUs and 6–8 GB.</li>
+      <li>Docker runs kind's node containers; containerd inside each node runs your Pods. Move images with
+        <code>kind load docker-image</code>.</li>
+      <li>The <code>primer</code> cluster: one control plane, two workers, NodePort 30080 published as localhost:8080.</li>
+      <li>Check configs before you use them; check the current context before you blame the cluster.</li>
+    </ul>
+    <div class="flashcards" data-title="Your Mac lab">
+      <script type="application/json">
+      [{"front": "Why Colima?", "back": "Containers need a Linux kernel. Colima runs a lightweight Linux VM with a Docker engine."},
+       {"front": "Who runs Pods in kind?", "back": "containerd inside each node container, driven by the kubelet over CRI."},
+       {"front": "Who runs kind's nodes?", "back": "Docker (in Colima). Each node is a container."},
+       {"front": "Move a local image into the cluster", "back": "<code>kind load docker-image NAME:TAG --name primer</code>"},
+       {"front": "List containers inside a node", "back": "<code>docker exec -it primer-worker crictl ps</code>"},
+       {"front": "<code>extraPortMappings</code>", "back": "Publishes a node container's port on the host: containerPort (node) → hostPort (Mac)."},
+       {"front": "A kubeconfig context", "back": "A named cluster + user + default namespace. kubectl uses the current one."},
+       {"front": "Nodes flap, 'too many open files'", "back": "Raise fs.inotify.max_user_watches and max_user_instances in the VM."},
+       {"front": "Pause the lab", "back": "<code>colima stop</code> / <code>colima start</code>. The cluster survives."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://kind.sigs.k8s.io/docs/user/configuration/">kind: Configuration</a> and <a href="https://kind.sigs.k8s.io/docs/user/quick-start/#loading-an-image-into-your-cluster">loading an image</a></li>
+      <li><a href="https://github.com/abiosoft/colima">Colima on GitHub</a></li>
+      <li><a href="https://kubernetes.io/docs/setup/production-environment/container-runtimes/">Kubernetes: Container runtimes</a></li>
+      <li><a href="../reference/cheatsheet.html">kubectl and kind cheat sheet</a></li>
+      <li>Next: <a href="m01-how-kubernetes-thinks.html">M01 How Kubernetes Thinks</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary · Kubernetes Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/kubelab-src.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-k8s.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-page="ref-glossary">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Reference · Vocabulary</p>
+    <h1>Glossary</h1>
+    <p class="lede">Terms used in Stage 1, with a link to where each is taught.</p>
+  </header>
+  <section class="lesson-section" id="terms">
+    <h2>Terms</h2>
+    <dl>
+      <dt id="term-api-server">API server</dt><dd>The cluster's front door: authenticates, authorises, validates, and stores every object, and serves watches. The only component that talks to etcd. <a href="../modules/m01-how-kubernetes-thinks.html#architecture">M01</a></dd>
+      <dt id="term-container-runtime">Container runtime</dt><dd>Software that pulls images and runs containers; containerd inside kind nodes. The kubelet talks to it over CRI. <a href="../modules/m00-mac-lab.html#runtimes">M00</a></dd>
+      <dt id="term-context">Context</dt><dd>A named cluster, user, and default namespace in your kubeconfig. kubectl always uses the current one. <a href="../modules/m00-mac-lab.html#create">M00</a></dd>
+      <dt id="term-controller">Controller</dt><dd>A loop that observes desired and actual state for one kind of object, and acts to close the gap. <a href="../modules/m01-how-kubernetes-thinks.html#controllers">M01</a></dd>
+      <dt id="term-cri">CRI</dt><dd>Container Runtime Interface: the gRPC API between the kubelet and a runtime. <a href="../modules/m00-mac-lab.html#runtimes">M00</a></dd>
+      <dt id="term-crashloopbackoff">CrashLoopBackOff</dt><dd>A container keeps exiting and the kubelet is waiting, with growing delays, before restarting it. A symptom, not a cause. <a href="../modules/m02-pods.html#lifecycle">M02</a></dd>
+      <dt id="term-cronjob">CronJob</dt><dd>Creates Jobs on a schedule. <a href="../modules/m03-deployments-and-workloads.html#jobs">M03</a></dd>
+      <dt id="term-daemonset">DaemonSet</dt><dd>Runs one Pod on every matching node. <a href="../modules/m03-deployments-and-workloads.html#other-controllers">M03</a></dd>
+      <dt id="term-deployment">Deployment</dt><dd>Manages ReplicaSets to run stateless replicas and roll between versions. <a href="../modules/m03-deployments-and-workloads.html#deployment">M03</a></dd>
+      <dt id="term-etcd">etcd</dt><dd>The consistent key-value store holding all cluster state. <a href="../modules/m01-how-kubernetes-thinks.html#architecture">M01</a></dd>
+      <dt id="term-init-container">Init container</dt><dd>Runs to completion before the app containers start. With <code>restartPolicy: Always</code> it becomes a native sidecar. <a href="../modules/m02-pods.html#multi-container">M02</a></dd>
+      <dt id="term-job">Job</dt><dd>Runs Pods until a number of them succeed, with retries and deadlines. <a href="../modules/m03-deployments-and-workloads.html#jobs">M03</a></dd>
+      <dt id="term-kind">kind</dt><dd>Kubernetes IN Docker: a tool that runs each cluster node as a container. <a href="../modules/m00-mac-lab.html#kind-config">M00</a></dd>
+      <dt id="term-kubelet">kubelet</dt><dd>The node agent: runs the Pods assigned to its node and reports their status. <a href="../modules/m01-how-kubernetes-thinks.html#architecture">M01</a></dd>
+      <dt id="term-label">Label and selector</dt><dd>Key/value pairs on objects, and queries over them. Controllers and Services find Pods by selector. <a href="../modules/m03-deployments-and-workloads.html#selectors">M03</a></dd>
+      <dt id="term-level-triggered">Level-triggered</dt><dd>Acting on current state rather than on individual events, so missed events don't matter. <a href="../modules/m01-how-kubernetes-thinks.html#controllers">M01</a></dd>
+      <dt id="term-oomkilled">OOMKilled</dt><dd>A container went over its memory limit and the kernel killed it (exit code 137). <a href="../modules/m02-pods.html#resources">M02</a></dd>
+      <dt id="term-pod">Pod</dt><dd>One or more containers scheduled together, sharing an IP and volumes. <a href="../modules/m02-pods.html#anatomy">M02</a></dd>
+      <dt id="term-probe">Probe</dt><dd>A health check: startup (has it booted?), readiness (may it get traffic?), liveness (is it wedged?). <a href="../modules/m02-pods.html#probes">M02</a></dd>
+      <dt id="term-qos">QoS class</dt><dd>Guaranteed, Burstable, or BestEffort, derived from requests and limits; decides eviction order. <a href="../modules/m02-pods.html#resources">M02</a></dd>
+      <dt id="term-reconcile">Reconcile loop</dt><dd>Observe, diff, act, repeat. <a href="../modules/m01-how-kubernetes-thinks.html#controllers">M01</a></dd>
+      <dt id="term-replicaset">ReplicaSet</dt><dd>Keeps a number of identical Pods running. Managed by a Deployment. <a href="../modules/m03-deployments-and-workloads.html#why">M03</a></dd>
+      <dt id="term-request-limit">Request and limit</dt><dd>A request reserves capacity for scheduling; a limit caps usage at runtime. <a href="../modules/m02-pods.html#resources">M02</a></dd>
+      <dt id="term-rolling-update">Rolling update</dt><dd>Replacing Pods gradually, bounded by maxSurge and maxUnavailable. <a href="../modules/m03-deployments-and-workloads.html#rolling">M03</a></dd>
+      <dt id="term-scheduler">Scheduler</dt><dd>Assigns each unscheduled Pod to a node by filtering and scoring. <a href="../modules/m01-how-kubernetes-thinks.html#journey">M01</a></dd>
+      <dt id="term-sidecar">Native sidecar</dt><dd>An init container with <code>restartPolicy: Always</code> that runs alongside the app. <a href="../modules/m02-pods.html#multi-container">M02</a></dd>
+      <dt id="term-spec-status">spec and status</dt><dd>Desired state (written by you) and observed state (written by the system). <a href="../modules/m01-how-kubernetes-thinks.html#objects">M01</a></dd>
+      <dt id="term-statefulset">StatefulSet</dt><dd>Runs replicas with stable names, stable DNS, and a volume each. <a href="../modules/m03-deployments-and-workloads.html#other-controllers">M03</a></dd>
+    </dl>
+  </section>
+</main>
+</body>
+</html>

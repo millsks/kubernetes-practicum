@@ -1,0 +1,6 @@
+# kind-primer.yaml: the cluster you'll use for the whole course.
+# TODO: name the cluster, add two workers, and publish node port 30080 as host port 8080 (see the README).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

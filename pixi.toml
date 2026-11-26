@@ -1,0 +1,66 @@
+[workspace]
+authors = ["Kevin Mills <millsks@gmail.com>"]
+channels = ["conda-forge"]
+name = "kubernetes-practicum"
+platforms = ["osx-arm64", "osx-64", "linux-64", "win-64"]
+version = "0.1.0"
+
+[dependencies]
+python = "3.14.*"
+structlog = ">=26.1.0,<27"
+pyyaml = ">=6.0.2,<7"
+kubernetes-helm = ">=4.0,<5"      # helm (used from Stage 3)
+
+# kubectl: conda-forge only has current builds for these platforms; on Intel Macs use `brew install kubectl`.
+[target.osx-arm64.dependencies]
+kubernetes-client = ">=1.34,<2"
+
+[target.linux-64.dependencies]
+kubernetes-client = ">=1.34,<2"
+
+[target.win-64.dependencies]
+kubernetes-client = ">=1.34,<2"
+
+[pypi-dependencies]
+kubernetes-practicum = { path = ".", editable = true }
+
+[feature.dev.dependencies]
+pytest = "*"
+types-pyyaml = "*"
+pytest-cov = "*"
+mypy = "*"
+ruff = "*"
+pre-commit = "*"
+git-cliff = "*"
+python-build = "*"
+hatchling = "*"
+act = "*"
+
+[environments]
+default = { features = ["dev"], solve-group = "default" }
+
+[tasks]
+bootstrap = "pre-commit install --install-hooks && pre-commit install --hook-type commit-msg"
+fmt = "ruff format ."
+lint = "ruff check ."
+check = "mypy src/"
+test = "pytest tests/unit/"
+test-integration = "pytest tests/integration/"
+cov = "pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=90"
+build = "python -m build --no-isolation"
+changelog = "git cliff -o CHANGELOG.md"
+act = "act --container-architecture linux/amd64"
+pre-commit-all = "pre-commit run --all-files"
+ci = { depends-on = ["pre-commit-all", "build", "check", "lint", "check-site", "check-exercises", "check-labs", "cov"] }
+
+# Learner workflow
+serve = "practicum serve"
+labs = "practicum labs"
+start = { cmd = "practicum start {{ lab }}", args = ["lab"] }
+grade = { cmd = "practicum grade {{ lab }}", args = ["lab"] }
+grade-live = { cmd = "practicum grade {{ lab }} --live", args = ["lab"] }
+check-labs = "practicum check-labs"
+check-exercises = "practicum check-exercises"
+check-site = "practicum check-site"
+bundle = "practicum bundle"
+sync-runtime = "practicum sync-runtime"

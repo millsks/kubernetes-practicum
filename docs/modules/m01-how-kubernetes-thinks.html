@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M01 · How Kubernetes Thinks · Kubernetes Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/kubelab-src.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-k8s.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m01">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · Foundations · Module 01</p>
+    <h1>How Kubernetes Thinks</h1>
+    <p class="lede">Kubernetes isn't a tool that runs containers when you ask. It's a database of what you want,
+      surrounded by control loops that keep making the world match it. Once that model clicks, every feature in
+      the rest of the course (rollouts, autoscaling, GitOps) is the same idea applied to a different object.</p>
+    <div class="lesson-meta"><span>⏱ ~2 hours</span><span>Prerequisites: <a href="m00-mac-lab.html">M00 Your Mac Lab</a></span></div>
+    <ul class="objectives">
+      <li>Name each control-plane and node component and say what it's responsible for</li>
+      <li>Read any object as apiVersion, kind, metadata, spec, and status, and know who writes each part</li>
+      <li>Explain declarative configuration and why <code>kubectl apply</code> is idempotent</li>
+      <li>Describe a controller's reconcile loop, and why level-triggered loops self-heal</li>
+      <li>Trace a Deployment from <code>kubectl apply</code> to running containers, naming each component that acts</li>
+      <li>Use the everyday kubectl verbs, output formats, and <code>kubectl explain</code></li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="why">
+    <h2>The problem Kubernetes solves</h2>
+    <p>Running one container on one machine is easy. Running hundreds across a fleet of machines raises questions
+      that a single <code>docker run</code> never answers: which machine has room? What happens when a machine dies
+      at 3 a.m.? How do you replace version 1 with version 2 without dropping requests? How do clients find a
+      container whose IP keeps changing?</p>
+    <p>Kubernetes answers all of these with one design. You <strong>declare</strong> the end state you want
+      ("three copies of this web server, version 2, reachable as <code>web</code>"). The system stores that
+      declaration and runs <strong>controllers</strong> that notice any difference between what you declared and
+      what exists, and fix it. Nobody, including you, scripts the steps.</p>
+    <div class="card-grid">
+      <div class="card"><h4>Scheduling</h4><p>Pick a node with enough CPU and memory, honouring your rules.</p></div>
+      <div class="card"><h4>Self-healing</h4><p>Replace containers and Pods that die, and Pods on nodes that die.</p></div>
+      <div class="card"><h4>Rollouts</h4><p>Move from one version to the next gradually, and roll back.</p></div>
+      <div class="card"><h4>Discovery</h4><p>Give a changing set of Pods one stable name and address.</p></div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="architecture">
+    <h2>The architecture</h2>
+    <figure class="figure">
+      <svg class="diagram" viewBox="0 0 780 330" role="img" aria-label="Control plane with API server, etcd, scheduler, controller manager; worker node with kubelet, kube-proxy, containerd and Pods">
+        <rect x="10" y="10" width="370" height="310" rx="10" fill="none" stroke="var(--fg-muted)" stroke-dasharray="5 4"/>
+        <text x="24" y="30" font-size="13" font-weight="600" fill="var(--fg-muted)">Control plane</text>
+        <rect x="110" y="44" width="170" height="54" rx="8" fill="var(--accent)"/>
+        <text x="195" y="67" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-fg)">kube-apiserver</text>
+        <text x="195" y="85" text-anchor="middle" font-size="11" fill="var(--accent-fg)">the only front door</text>
+        <rect x="30" y="140" width="150" height="54" rx="8" fill="var(--fg)"/>
+        <text x="105" y="163" text-anchor="middle" font-size="13" font-weight="700" fill="var(--bg)">etcd</text>
+        <text x="105" y="181" text-anchor="middle" font-size="11" fill="var(--bg)">all cluster state</text>
+        <rect x="210" y="140" width="150" height="54" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="285" y="163" text-anchor="middle" font-size="13" fill="var(--fg)">scheduler</text>
+        <text x="285" y="181" text-anchor="middle" font-size="11" fill="var(--fg-muted)">picks a node</text>
+        <rect x="30" y="230" width="150" height="54" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="105" y="253" text-anchor="middle" font-size="13" fill="var(--fg)">controller-manager</text>
+        <text x="105" y="271" text-anchor="middle" font-size="11" fill="var(--fg-muted)">dozens of loops</text>
+        <rect x="210" y="230" width="150" height="54" rx="8" fill="none" stroke="var(--fg-muted)" stroke-dasharray="4 3"/>
+        <text x="285" y="253" text-anchor="middle" font-size="13" fill="var(--fg-muted)">cloud-controller</text>
+        <text x="285" y="271" text-anchor="middle" font-size="11" fill="var(--fg-muted)">(not on kind)</text>
+        <line x1="160" y1="98" x2="110" y2="140" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="230" y1="98" x2="280" y2="140" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="150" y1="98" x2="105" y2="230" stroke="var(--fg)" stroke-width="1.5"/>
+        <rect x="410" y="10" width="360" height="310" rx="10" fill="none" stroke="var(--fg-muted)" stroke-dasharray="5 4"/>
+        <text x="424" y="30" font-size="13" font-weight="600" fill="var(--fg-muted)">Worker node</text>
+        <rect x="430" y="44" width="150" height="54" rx="8" fill="var(--accent)"/>
+        <text x="505" y="67" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent-fg)">kubelet</text>
+        <text x="505" y="85" text-anchor="middle" font-size="11" fill="var(--accent-fg)">runs assigned Pods</text>
+        <rect x="600" y="44" width="150" height="54" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="675" y="67" text-anchor="middle" font-size="13" fill="var(--fg)">kube-proxy</text>
+        <text x="675" y="85" text-anchor="middle" font-size="11" fill="var(--fg-muted)">Service → Pod rules</text>
+        <rect x="430" y="140" width="150" height="54" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="505" y="163" text-anchor="middle" font-size="13" fill="var(--fg)">containerd</text>
+        <text x="505" y="181" text-anchor="middle" font-size="11" fill="var(--fg-muted)">pulls and runs</text>
+        <rect x="430" y="232" width="150" height="48" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="505" y="261" text-anchor="middle" font-size="13" fill="var(--fg)">Pod</text>
+        <rect x="600" y="232" width="150" height="48" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="675" y="261" text-anchor="middle" font-size="13" fill="var(--fg)">Pod</text>
+        <line x1="505" y1="98" x2="505" y2="140" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="505" y1="194" x2="505" y2="232" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="540" y1="194" x2="640" y2="232" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="430" y1="71" x2="280" y2="71" stroke="var(--accent)" stroke-width="2"/>
+        <text x="355" y="62" text-anchor="middle" font-size="11" fill="var(--fg-muted)">watch / report</text>
+      </svg>
+      <figcaption>Everything talks to the API server. Nothing else touches etcd, and components don't call each
+        other: each one watches the API for objects it cares about and writes back what it did.</figcaption>
+    </figure>
+    <div class="scroll"><table>
+      <thead><tr><th>Component</th><th>Runs on</th><th>Job in one sentence</th></tr></thead>
+      <tbody>
+        <tr><td>kube-apiserver</td><td>Control plane</td><td>Authenticates, authorises, validates, and stores every object; serves watches</td></tr>
+        <tr><td>etcd</td><td>Control plane</td><td>A consistent key-value store that holds the entire cluster state</td></tr>
+        <tr><td>kube-scheduler</td><td>Control plane</td><td>Assigns each unscheduled Pod to a node by filtering and scoring</td></tr>
+        <tr><td>kube-controller-manager</td><td>Control plane</td><td>Runs the built-in reconcile loops: ReplicaSet, Deployment, Node, Job, EndpointSlice, and more</td></tr>
+        <tr><td>kubelet</td><td>Every node</td><td>Makes the node's containers match the Pods assigned to it, and reports their status</td></tr>
+        <tr><td>kube-proxy</td><td>Every node</td><td>Programs packet rules so a Service's virtual IP reaches a ready Pod</td></tr>
+        <tr><td>container runtime</td><td>Every node</td><td>containerd here: pulls images and runs containers when the kubelet asks</td></tr>
+        <tr><td>CoreDNS, CNI (kindnet)</td><td>Pods</td><td>Cluster DNS names; Pod networking across nodes</td></tr>
+      </tbody>
+    </table></div>
+    <pre data-label="Terminal"><code class="language-bash">kubectl -n kube-system get pods -o wide
+docker exec primer-control-plane ls /etc/kubernetes/manifests   # control plane runs as static Pods</code></pre>
+  </section>
+
+  <section class="lesson-section" id="objects">
+    <h2>Objects: spec and status</h2>
+    <p>Everything you create is an <strong>object</strong> stored by the API server. Every object has the same
+      outer shape:</p>
+    <pre><code class="language-yaml">apiVersion: apps/v1          # API group "apps", version "v1" (core objects are just "v1")
+kind: Deployment             # the type
+metadata:                    # identity: name, namespace, labels, annotations
+  name: web
+  namespace: default
+  labels: {app: web}
+spec:                        # what YOU want (desired state)
+  replicas: 3
+status:                      # what the cluster OBSERVED (written by controllers)
+  readyReplicas: 2</code></pre>
+    <div class="two-col">
+      <div><h4>You write</h4><p><code>metadata</code> (mostly) and <code>spec</code>. The spec is a request, not a
+        command: "there should be three replicas".</p></div>
+      <div><h4>Controllers write</h4><p><code>status</code>, plus metadata fields like <code>uid</code>,
+        <code>resourceVersion</code>, <code>generation</code>, and <code>ownerReferences</code>.</p></div>
+    </div>
+    <p><strong>Namespaces</strong> divide one cluster into named groups (<code>default</code>,
+      <code>kube-system</code>, <code>apps</code>…). Most objects live in one; a few (Nodes, Namespaces themselves,
+      PersistentVolumes) are cluster-wide. <code>kubectl api-resources</code> lists every kind and whether it's
+      namespaced.</p>
+    <div class="runnable" data-title="Read an object like a controller">
+<textarea>
+import kubelab
+
+deploy = kubelab.load_manifests("""
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, generation: 4}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      containers: [{name: app, image: "ghcr.io/stefanprodan/podinfo:6.7.1"}]
+status: {observedGeneration: 4, replicas: 3, readyReplicas: 2}
+""")[0]
+
+print("desired:", kubelab.dig(deploy, "spec.replicas"))
+print("ready:  ", kubelab.dig(deploy, "status.readyReplicas"))
+print("image:  ", kubelab.dig(deploy, "spec.template.spec.containers.0.image"))
+print("problems:", kubelab.check_object(deploy))
+</textarea>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="declarative">
+    <h2>Declarative, not imperative</h2>
+    <div class="scroll"><table>
+      <thead><tr><th></th><th>Imperative</th><th>Declarative</th></tr></thead>
+      <tbody>
+        <tr><td>You say</td><td>"Start 2 more containers"</td><td>"There should be 5"</td></tr>
+        <tr><td>Run it twice</td><td>4 more containers</td><td>Still 5: the second run changes nothing</td></tr>
+        <tr><td>Something dies later</td><td>Nobody notices</td><td>The controller sees 4, wants 5, creates 1</td></tr>
+        <tr><td>Where the truth lives</td><td>In your shell history</td><td>In a file you can review, diff, and version</td></tr>
+        <tr><td>kubectl</td><td><code>run</code>, <code>create</code>, <code>scale</code>, <code>set image</code></td><td><code>apply -f</code>, <code>diff -f</code>, <code>delete -f</code></td></tr>
+      </tbody>
+    </table></div>
+    <p><code>kubectl apply</code> sends your file to the API server, which merges it into the stored object. It's
+      <strong>idempotent</strong>: applying the same file again is a no-op. That's what lets you keep manifests in
+      Git and apply them on every change, which is all GitOps is (Stage 4).</p>
+    <div class="runnable" data-predict data-title="Predict: what does a second apply change?">
+<textarea>
+desired = {"replicas": 5, "image": "web:2"}
+stored = {"replicas": 3, "image": "web:1"}
+
+def apply(stored, desired):
+    changed = sorted(k for k in desired if stored.get(k) != desired[k])
+    stored.update(desired)
+    return changed
+
+print(apply(stored, desired))
+print(apply(stored, desired))
+</textarea>
+    </div>
+    <aside class="callout tip"><p><strong>Remember:</strong> imperative commands are fine for learning and
+      emergencies. For anything you want to keep, write a file and <code>apply</code> it.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="controllers">
+    <h2>Controllers and the reconcile loop</h2>
+    <p>A <strong>controller</strong> is a loop that owns one kind of object. Each pass it does three things:</p>
+    <ol>
+      <li><strong>Observe</strong>: read the desired state (the spec) and the actual state (what exists).</li>
+      <li><strong>Diff</strong>: compute the difference.</li>
+      <li><strong>Act</strong>: take a step that makes the difference smaller, then go around again.</li>
+    </ol>
+    <p>Step through a ReplicaSet controller handling a deleted Pod, a scale-up, a dead node, and a scale-down:</p>
+    <div class="viz" data-viz="reconcile"></div>
+    <p>Kubernetes controllers are <strong>level-triggered</strong>: they act on the current <em>state</em> ("there
+      are 4, there should be 5"), not on the <em>event</em> that caused it ("a Pod was deleted"). If a controller
+      crashes and misses ten events, it doesn't matter: when it comes back it compares state again and does the
+      right thing. That's the source of Kubernetes' self-healing.</p>
+    <aside class="callout think"><p>An edge-triggered system reacts to each event once. What goes wrong if it misses
+      the "Pod deleted" event while it's restarting? Why can't that happen to a level-triggered loop?</p></aside>
+    <p>Controllers stack. A Deployment controller manages ReplicaSets; a ReplicaSet controller manages Pods; the
+      scheduler places Pods; the kubelet runs them. Each owns one level and records ownership in
+      <code>metadata.ownerReferences</code>, which is also how <strong>garbage collection</strong> works: delete a
+      Deployment and its ReplicaSets and Pods are deleted after it.</p>
+  </section>
+
+  <section class="lesson-section" id="journey">
+    <h2>From <code>kubectl apply</code> to a running container</h2>
+    <pre class="mermaid">
+sequenceDiagram
+  participant You as kubectl apply
+  participant API as API server + etcd
+  participant DC as Deployment controller
+  participant RC as ReplicaSet controller
+  participant S as Scheduler
+  participant K as kubelet (worker)
+  You->>API: Deployment web (replicas: 3)
+  API-->>DC: watch: new Deployment
+  DC->>API: create ReplicaSet web-7d9f
+  API-->>RC: watch: new ReplicaSet
+  RC->>API: create 3 Pods (no node yet)
+  API-->>S: watch: unscheduled Pods
+  S->>API: bind each Pod to a node
+  API-->>K: watch: Pod assigned to me
+  K->>K: containerd pulls image, starts containers
+  K->>API: status: Running, Ready
+    </pre>
+    <p>Notice that nobody calls anybody. Each component watches the API for its own kind of work, does it, and
+      writes the result back. You can watch the same story in the event stream:</p>
+    <pre data-label="Terminal"><code class="language-bash">kubectl create deployment hello --image=nginx:1.27-alpine --replicas=2
+kubectl get events --sort-by=.lastTimestamp | tail -12
+# ScalingReplicaSet → SuccessfulCreate → Scheduled → Pulling → Pulled → Created → Started
+kubectl delete deployment hello</code></pre>
+  </section>
+
+  <section class="lesson-section" id="kubectl">
+    <h2>The kubectl you need first</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Verb</th><th>Example</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>get</td><td><code>kubectl get pods -A -o wide</code></td><td><code>-A</code> all namespaces, <code>-o yaml</code> the whole object, <code>-w</code> watch</td></tr>
+        <tr><td>describe</td><td><code>kubectl describe pod web-abc</code></td><td>Human view with <strong>Events</strong> at the bottom: read these first when debugging</td></tr>
+        <tr><td>apply / diff / delete</td><td><code>kubectl diff -f app.yaml</code></td><td>See what would change before you apply</td></tr>
+        <tr><td>explain</td><td><code>kubectl explain deployment.spec.strategy</code></td><td>Schema docs from your own cluster, offline</td></tr>
+        <tr><td>logs / exec</td><td><code>kubectl logs -f POD</code>, <code>kubectl exec -it POD -- sh</code></td><td>Covered fully in M02</td></tr>
+        <tr><td>api-resources</td><td><code>kubectl api-resources</code></td><td>Every kind, its short name, group, and whether it's namespaced</td></tr>
+        <tr><td>jsonpath</td><td><code>kubectl get deploy web -o jsonpath='{.status.readyReplicas}'</code></td><td>Pull one field out for scripts</td></tr>
+      </tbody>
+    </table></div>
+    <aside class="callout pro"><p>Short names save typing: <code>po</code>, <code>deploy</code>, <code>rs</code>,
+      <code>svc</code>, <code>ns</code>, <code>cm</code>. Add <code>alias k=kubectl</code> to your shell and the
+      completion script from <code>kubectl completion zsh</code>.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Five exercises on reconciling, API groups, rollout status, ownership, and grouping Pods.</p>
+
+    <div class="exercise" data-id="m01-e1" data-title="One reconcile step">
+      <div class="exercise-prompt">
+        <p>Write <code>reconcile_step(desired, actual)</code> that returns a tuple <code>(action, count)</code>:
+          <code>("create", n)</code> when there are too few, <code>("delete", n)</code> when there are too many,
+          and <code>("none", 0)</code> when they match. Negative <code>desired</code> is invalid: raise
+          <code>ValueError</code>.</p>
+      </div>
+<textarea class="starter">
+def reconcile_step(desired, actual):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def test_create():
+    assert reconcile_step(3, 1) == ("create", 2)
+
+def test_delete():
+    assert reconcile_step(2, 5) == ("delete", 3)
+
+def test_none():
+    assert reconcile_step(4, 4) == ("none", 0)
+
+def test_zero():
+    assert reconcile_step(0, 2) == ("delete", 2), "scaling to zero deletes every Pod"
+
+def test_invalid():
+    try:
+        reconcile_step(-1, 0)
+    except ValueError:
+        return
+    raise AssertionError("negative desired should raise ValueError")
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Compute <code>diff = desired - actual</code> once and branch on
+        its sign.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def reconcile_step(desired, actual):
+    if desired &lt; 0:
+        raise ValueError("desired must not be negative")
+    diff = desired - actual
+    if diff &gt; 0:
+        return ("create", diff)
+    if diff &lt; 0:
+        return ("delete", -diff)
+    return ("none", 0)</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m01-e2" data-title="Group and version">
+      <div class="exercise-prompt">
+        <p>Write <code>split_api_version(api_version)</code> that returns <code>(group, version)</code>. Core objects
+          have an empty group: <code>"v1"</code> gives <code>("", "v1")</code>, while <code>"apps/v1"</code> gives
+          <code>("apps", "v1")</code> and <code>"networking.k8s.io/v1"</code> gives
+          <code>("networking.k8s.io", "v1")</code>.</p>
+      </div>
+<textarea class="starter">
+def split_api_version(api_version):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def test_core():
+    assert split_api_version("v1") == ("", "v1")
+
+def test_named():
+    assert split_api_version("apps/v1") == ("apps", "v1")
+    assert split_api_version("networking.k8s.io/v1") == ("networking.k8s.io", "v1")
+    assert split_api_version("batch/v1") == ("batch", "v1")
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>str.rpartition("/")</code> returns
+        <code>("", "", "v1")</code> when there's no slash.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def split_api_version(api_version):
+    group, _, version = api_version.rpartition("/")
+    return (group, version)</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m01-e3" data-title="Is the rollout finished?">
+      <div class="exercise-prompt">
+        <p>A Deployment's status can lag behind its spec. Write <code>rollout_complete(deploy)</code> that returns
+          <code>True</code> only when the controller has <strong>seen</strong> the latest spec
+          (<code>status.observedGeneration &gt;= metadata.generation</code>) and <code>status.updatedReplicas</code>,
+          <code>status.readyReplicas</code>, and <code>status.replicas</code> all equal <code>spec.replicas</code>.
+          Missing status fields count as 0. This is roughly what <code>kubectl rollout status</code> waits for.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def rollout_complete(deploy):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def d(gen, observed, spec, updated, ready, total):
+    return {"metadata": {"generation": gen}, "spec": {"replicas": spec},
+            "status": {"observedGeneration": observed, "updatedReplicas": updated, "readyReplicas": ready, "replicas": total}}
+
+def test_done():
+    assert rollout_complete(d(3, 3, 4, 4, 4, 4)) is True
+
+def test_not_observed_yet():
+    assert rollout_complete(d(4, 3, 4, 4, 4, 4)) is False, "the controller hasn't seen generation 4 yet"
+
+def test_still_rolling():
+    assert rollout_complete(d(3, 3, 4, 2, 4, 5)) is False, "old Pods still exist (replicas 5) and only 2 are updated"
+
+def test_missing_status():
+    assert rollout_complete({"metadata": {"generation": 1}, "spec": {"replicas": 2}}) is False
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>kubelab.dig(deploy, "status.readyReplicas", 0)</code>
+        reads a nested field with a default.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def rollout_complete(deploy):
+    want = kubelab.dig(deploy, "spec.replicas", 1)
+    if kubelab.dig(deploy, "status.observedGeneration", 0) &lt; kubelab.dig(deploy, "metadata.generation", 0):
+        return False
+    fields = ("updatedReplicas", "readyReplicas", "replicas")
+    return all(kubelab.dig(deploy, f"status.{f}", 0) == want for f in fields)</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m01-e4" data-title="Who owns this Pod?">
+      <div class="exercise-prompt">
+        <p>Write <code>owner_chain(objects, kind, name)</code> that starts at one object and follows the first
+          <code>metadata.ownerReferences</code> entry upward, returning <code>["Pod/web-7d9f-x2", "ReplicaSet/web-7d9f",
+          "Deployment/web"]</code>. Stop when an object has no owner, or when the owner isn't in
+          <code>objects</code>.</p>
+      </div>
+<textarea class="starter">
+def owner_chain(objects, kind, name):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+OBJS = [
+    {"kind": "Deployment", "metadata": {"name": "web"}},
+    {"kind": "ReplicaSet", "metadata": {"name": "web-7d9f", "ownerReferences": [{"kind": "Deployment", "name": "web"}]}},
+    {"kind": "Pod", "metadata": {"name": "web-7d9f-x2", "ownerReferences": [{"kind": "ReplicaSet", "name": "web-7d9f"}]}},
+    {"kind": "Pod", "metadata": {"name": "orphan", "ownerReferences": [{"kind": "ReplicaSet", "name": "gone"}]}},
+    {"kind": "Pod", "metadata": {"name": "bare"}},
+]
+
+def test_full_chain():
+    assert owner_chain(OBJS, "Pod", "web-7d9f-x2") == ["Pod/web-7d9f-x2", "ReplicaSet/web-7d9f", "Deployment/web"]
+
+def test_missing_owner():
+    assert owner_chain(OBJS, "Pod", "orphan") == ["Pod/orphan"]
+
+def test_bare_pod():
+    assert owner_chain(OBJS, "Pod", "bare") == ["Pod/bare"]
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Build a dict keyed by <code>(kind, name)</code> first, then loop
+        while the current object has an owner you can look up.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def owner_chain(objects, kind, name):
+    index = {(o["kind"], o["metadata"]["name"]): o for o in objects}
+    chain = []
+    current = index.get((kind, name))
+    while current is not None:
+        chain.append(f"{current['kind']}/{current['metadata']['name']}")
+        owners = current["metadata"].get("ownerReferences") or []
+        if not owners:
+            break
+        current = index.get((owners[0]["kind"], owners[0]["name"]))
+    return chain</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m01-e5" data-title="Pods per node">
+      <div class="exercise-prompt">
+        <p>Given Pods as returned by <code>kubectl get pods -o json</code> (<code>items</code> only), write
+          <code>pods_by_node(pods)</code> returning a dict of node name to a <strong>sorted</strong> list of Pod
+          names. Pods without <code>spec.nodeName</code> haven't been scheduled: put them under
+          <code>"&lt;pending&gt;"</code>.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def pods_by_node(pods):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+PODS = [
+    {"metadata": {"name": "web-b"}, "spec": {"nodeName": "primer-worker"}},
+    {"metadata": {"name": "web-a"}, "spec": {"nodeName": "primer-worker"}},
+    {"metadata": {"name": "web-c"}, "spec": {"nodeName": "primer-worker2"}},
+    {"metadata": {"name": "web-d"}, "spec": {}},
+]
+
+def test_grouping():
+    assert pods_by_node(PODS) == {"primer-worker": ["web-a", "web-b"], "primer-worker2": ["web-c"], "<pending>": ["web-d"]}
+
+def test_empty():
+    assert pods_by_node([]) == {}
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Use <code>dict.setdefault(node, []).append(name)</code>, then sort
+        each list.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def pods_by_node(pods):
+    groups = {}
+    for pod in pods:
+        node = kubelab.dig(pod, "spec.nodeName") or "&lt;pending&gt;"
+        groups.setdefault(node, []).append(pod["metadata"]["name"])
+    return {node: sorted(names) for node, names in groups.items()}</code></pre></details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Lab: write a ReplicaSet controller</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Lab m01-lab1</span><span class="w-title">reconciler.py: the loop at the heart of Kubernetes</span></div>
+      <div class="widget-body">
+        <p>Write the decision logic of a ReplicaSet controller in plain Python. Given the desired replica count and
+          the Pods that exist, your <code>reconcile()</code> returns which Pods to create and which to delete, using
+          the same rules Kubernetes uses: only active Pods count, terminating Pods are left alone, and when scaling
+          down, the Pods least likely to be serving go first. Then write <code>converge()</code>, which applies
+          actions until nothing changes, and prove it's idempotent.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi run start m01-lab1
+# read labs/m01-lab1/README.md, edit work/m01-lab1/reconciler.py
+pixi run grade m01-lab1</code></pre>
+        <ul class="checklist" data-id="m01-lab1">
+          <li>Counts only Pods that are active (Pending or Running, not terminating)</li>
+          <li>Creates exactly the missing number of Pods, with unique names</li>
+          <li>Scales down unscheduled, then not-ready, then newest Pods first</li>
+          <li>Never deletes a Pod that is already terminating</li>
+          <li><code>converge()</code> reaches a fixed point; a second call returns no actions</li>
+          <li><code>pixi run grade m01-lab1</code> passes</li>
+        </ul>
+        <p><strong>Stretch:</strong> add a <code>burst</code> limit so one reconcile creates at most N Pods, the way
+          the real controller batches creations.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m01-quiz">
+<script type="application/json">
+{"title": "How Kubernetes Thinks quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Which component decides which node a new Pod runs on?", "options": ["kubelet", "kube-scheduler", "kube-proxy", "etcd"], "answer": 1, "explanation": "<p>The scheduler filters and scores nodes, then binds the Pod by setting <code>spec.nodeName</code>. The kubelet on that node runs it.</p>"},
+  {"type": "single", "prompt": "Which component may read and write etcd directly?", "options": ["Any controller", "The kubelet", "Only the API server", "CoreDNS"], "answer": 2, "explanation": "<p>Everything else goes through the API server, which handles authentication, authorisation, admission, and validation.</p>"},
+  {"type": "single", "prompt": "Who writes an object's <code>status</code>?", "options": ["You, in the manifest", "Controllers and the kubelet", "etcd", "kubectl"], "answer": 1, "explanation": "<p>You write the spec (desired state). The system writes the status (observed state).</p>"},
+  {"type": "single", "prompt": "You delete a Pod owned by a ReplicaSet. What happens?", "options": ["It's gone for good", "The ReplicaSet controller creates a replacement with a new name", "The kubelet restores the same Pod", "etcd rolls back the deletion"], "answer": 1, "explanation": "<p>The controller sees fewer Pods than desired and creates one. Pods are cattle, not pets: the replacement is a new object.</p>"},
+  {"type": "single", "prompt": "What makes Kubernetes controllers robust to missed events?", "options": ["They retry every event three times", "They're level-triggered: they compare current state with desired state each pass", "etcd replays all events", "The scheduler buffers events"], "answer": 1, "explanation": "<p>Acting on state rather than on individual events means a restarted controller still does the right thing.</p>"},
+  {"type": "multi", "prompt": "Which of these are declarative?", "options": ["<code>kubectl apply -f web.yaml</code>", "<code>kubectl scale deploy/web --replicas=5</code>", "A manifest in Git applied by a GitOps agent", "<code>kubectl run tmp --image=busybox</code>"], "answer": [0, 2], "explanation": "<p>Applying a file of desired state is declarative and idempotent. <code>scale</code> and <code>run</code> are imperative commands.</p>"},
+  {"type": "single", "prompt": "What is the API group of a Deployment (<code>apiVersion: apps/v1</code>)?", "options": ["v1", "apps", "core", "deployments"], "answer": 1, "explanation": "<p>The part before the slash is the group. Core objects such as Pods and Services have no group: <code>apiVersion: v1</code>.</p>"},
+  {"type": "single", "prompt": "You delete a Deployment. Why do its ReplicaSets and Pods disappear too?", "options": ["kubectl deletes them one by one", "Garbage collection follows <code>ownerReferences</code>", "The scheduler evicts them", "They time out"], "answer": 1, "explanation": "<p>Each child records its owner. When the owner goes, the garbage collector removes dependents.</p>"},
+  {"type": "single", "prompt": "What should you read first when a Pod misbehaves?", "options": ["<code>kubectl api-resources</code>", "The Events at the bottom of <code>kubectl describe</code>", "etcd's data directory", "The kubeconfig"], "answer": 1, "explanation": "<p>Events record scheduling, image pulls, probe failures, and kills.</p>"},
+  {"type": "text", "prompt": "Which kubectl verb shows the schema and documentation for a field, such as <code>deployment.spec.strategy</code>?", "answer": ["explain"], "explanation": "<p><code>kubectl explain</code> reads the schema from your own cluster, so it matches your version.</p>"},
+  {"type": "single", "prompt": "<code>status.observedGeneration</code> is 3 and <code>metadata.generation</code> is 4. What does that tell you?", "options": ["The rollout is finished", "The controller hasn't processed your latest spec change yet", "etcd is corrupt", "Generation 4 failed"], "answer": 1, "explanation": "<p>Each spec change bumps <code>generation</code>. The controller copies it to <code>observedGeneration</code> once it has acted on that version.</p>"},
+  {"type": "single", "prompt": "In the journey from <code>kubectl apply</code> to a running container, which component asks containerd to pull the image?", "options": ["The scheduler", "The ReplicaSet controller", "The kubelet on the chosen node", "The API server"], "answer": 2, "explanation": "<p>The kubelet watches for Pods bound to its node and drives the runtime to start them.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>The API server is the front door; etcd stores state; the scheduler places Pods; controllers reconcile;
+        the kubelet runs containers on each node.</li>
+      <li>Every object is apiVersion, kind, metadata, spec (you) and status (the system).</li>
+      <li>Declarative <code>apply</code> is idempotent: the file is the truth.</li>
+      <li>Controllers observe, diff, and act, level-triggered, which is why the cluster heals itself.</li>
+      <li>Nobody calls anybody: components watch the API and write back what they did. Events tell the story.</li>
+    </ul>
+    <div class="flashcards" data-title="How Kubernetes thinks">
+      <script type="application/json">
+      [{"front": "The only component that talks to etcd", "back": "kube-apiserver"},
+       {"front": "spec vs status", "back": "spec: desired state, written by you. status: observed state, written by controllers and the kubelet."},
+       {"front": "The reconcile loop", "back": "Observe desired and actual, diff, act to shrink the difference, repeat."},
+       {"front": "Level-triggered", "back": "Acts on current state, not on individual events, so missed events don't matter."},
+       {"front": "Who binds a Pod to a node?", "back": "The scheduler, by setting spec.nodeName."},
+       {"front": "Who starts the containers?", "back": "The kubelet on the node, via containerd."},
+       {"front": "ownerReferences", "back": "Child to owner links: Pod → ReplicaSet → Deployment. Drive garbage collection."},
+       {"front": "<code>apiVersion: apps/v1</code>", "back": "Group apps, version v1. Core kinds are just v1."},
+       {"front": "generation vs observedGeneration", "back": "generation bumps on each spec change; observedGeneration shows which one the controller has acted on."},
+       {"front": "First debugging step", "back": "<code>kubectl describe</code> and read the Events."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://kubernetes.io/docs/concepts/overview/components/">Kubernetes: Cluster components</a></li>
+      <li><a href="https://kubernetes.io/docs/concepts/architecture/controller/">Kubernetes: Controllers</a></li>
+      <li><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/">Kubernetes: Objects</a></li>
+      <li>Next: <a href="m02-pods.html">M02 Pods</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

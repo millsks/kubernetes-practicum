@@ -1,0 +1,9 @@
+# pod.yaml: podinfo, the way you'd ship it (see labs/m02-lab1/README.md).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: podinfo
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanprodan/podinfo:6.7.1

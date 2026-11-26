@@ -1,0 +1,17 @@
+# Answer from YOUR deployment.yaml and the M03 lesson.
+
+# The most Pods that can exist at once during a rollout of your Deployment.
+max_pods = 0
+
+# The fewest ready Pods during a rollout of your Deployment.
+min_ready = 0
+
+# Revisions 1 (6.7.0) and 2 (6.7.1) exist and 2 is live. You run `kubectl rollout undo`.
+# What revision number is live afterwards?
+revision_after_undo = 0
+
+# Does `kubectl scale deploy/podinfo --replicas=6` create a new revision? (true/false)
+scale_creates_revision = true
+
+# Which concurrencyPolicy skips a run while the previous Job is still active?
+skip_policy = ""

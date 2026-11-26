@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M03 · Deployments and Workloads · Kubernetes Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/kubelab-src.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-k8s.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m03">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · Foundations · Module 03</p>
+    <h1>Deployments and Workloads</h1>
+    <p class="lede">You almost never create Pods yourself. You create a controller that creates them, replaces them
+      when they die, and swaps them for a new version without dropping traffic. This module covers the Deployment,
+      the controller you'll use most, in depth, then the other workload kinds and when each one fits.</p>
+    <div class="lesson-meta"><span>⏱ ~2.5 hours</span><span>Prerequisites: <a href="m02-pods.html">M02 Pods</a></span></div>
+    <ul class="objectives">
+      <li>Explain how labels and selectors connect Deployments, ReplicaSets, and Pods, and the pitfalls of overlap</li>
+      <li>Write a Deployment and predict exactly how a rolling update proceeds for any maxSurge and maxUnavailable</li>
+      <li>Use minReadySeconds and progressDeadlineSeconds to make rollouts safe</li>
+      <li>Drive rollouts: status, history, pause, resume, restart, and undo</li>
+      <li>Choose between Deployment, StatefulSet, DaemonSet, Job, and CronJob</li>
+      <li>Write Jobs and CronJobs with retries, deadlines, concurrency policy, and history limits</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="why">
+    <h2>Why controllers</h2>
+    <p>A bare Pod has no guardian. If it crashes, the kubelet restarts its containers in place, but if the Pod is
+      deleted or its node dies, it's simply gone. A <strong>ReplicaSet</strong> fixes that: it keeps a number of
+      identical Pods running, using the reconcile loop you met in M01. A <strong>Deployment</strong> sits on top
+      and manages ReplicaSets, one per version of your Pod template, so it can move you from one version to the
+      next.</p>
+    <figure class="figure">
+      <svg class="diagram" viewBox="0 0 720 200" role="img" aria-label="A Deployment owns two ReplicaSets; the new one owns three Pods">
+        <rect x="20" y="72" width="150" height="56" rx="8" fill="var(--accent)"/>
+        <text x="95" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-fg)">Deployment web</text>
+        <text x="95" y="114" text-anchor="middle" font-size="11" fill="var(--accent-fg)">strategy · template</text>
+        <rect x="240" y="20" width="180" height="50" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="330" y="41" text-anchor="middle" font-size="13" fill="var(--fg)">ReplicaSet web-7d9f</text>
+        <text x="330" y="58" text-anchor="middle" font-size="11" fill="var(--fg-muted)">v1 · 0 replicas (kept for rollback)</text>
+        <rect x="240" y="122" width="180" height="50" rx="8" fill="var(--fg)"/>
+        <text x="330" y="143" text-anchor="middle" font-size="13" font-weight="700" fill="var(--bg)">ReplicaSet web-5c4b</text>
+        <text x="330" y="160" text-anchor="middle" font-size="11" fill="var(--bg)">v2 · 3 replicas</text>
+        <rect x="470" y="127" width="70" height="40" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="505" y="152" text-anchor="middle" font-size="12" fill="var(--fg)">pod</text>
+        <rect x="550" y="127" width="70" height="40" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="585" y="152" text-anchor="middle" font-size="12" fill="var(--fg)">pod</text>
+        <rect x="630" y="127" width="70" height="40" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="665" y="152" text-anchor="middle" font-size="12" fill="var(--fg)">pod</text>
+        <line x1="170" y1="92" x2="240" y2="48" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="170" y1="108" x2="240" y2="145" stroke="var(--accent)" stroke-width="2"/>
+        <line x1="420" y1="147" x2="470" y2="147" stroke="var(--accent)" stroke-width="2"/>
+      </svg>
+      <figcaption>Each change to the Pod template creates a new ReplicaSet (its name ends in a hash of the template).
+        The Deployment shifts replicas from the old one to the new one, and keeps old ReplicaSets at zero so it can
+        roll back.</figcaption>
+    </figure>
+  </section>
+
+  <section class="lesson-section" id="selectors">
+    <h2>Labels and selectors</h2>
+    <p><strong>Labels</strong> are key/value pairs on any object: <code>app.kubernetes.io/name: podinfo</code>,
+      <code>tier: front</code>. A <strong>selector</strong> is a query over labels. Controllers find "their" Pods by
+      selector, not by name, which is why the selector and the template's labels must agree.</p>
+    <pre><code class="language-yaml">selector:
+  matchLabels: {app.kubernetes.io/name: podinfo}       # every listed label must equal
+  matchExpressions:                                    # and every expression must hold
+    - {key: tier, operator: In, values: [front, edge]}
+    - {key: canary, operator: DoesNotExist}</code></pre>
+    <div class="scroll"><table>
+      <thead><tr><th>Rule</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>spec.selector</code> must match <code>spec.template.metadata.labels</code></td><td>Otherwise the controller couldn't see the Pods it creates; the API rejects it</td></tr>
+        <tr><td>A Deployment's selector is <strong>immutable</strong></td><td>Changing it would orphan every existing Pod. To change it, create a new Deployment</td></tr>
+        <tr><td>Two controllers must not select the same Pods</td><td>They'd fight, each deleting Pods the other created. Include a distinguishing label</td></tr>
+        <tr><td>Label values are strings</td><td>Write <code>version: "2"</code>, not <code>version: 2</code></td></tr>
+      </tbody>
+    </table></div>
+    <div class="runnable" data-title="Who selects whom?">
+<textarea>
+import kubelab
+
+pods = [
+    {"metadata": {"name": "a", "labels": {"app": "web", "tier": "front"}}},
+    {"metadata": {"name": "b", "labels": {"app": "web", "tier": "edge", "canary": "true"}}},
+    {"metadata": {"name": "c", "labels": {"app": "api"}}},
+]
+selector = {"matchLabels": {"app": "web"},
+            "matchExpressions": [{"key": "canary", "operator": "DoesNotExist"}]}
+print([p["metadata"]["name"] for p in kubelab.select(selector, pods)])
+print([p["metadata"]["name"] for p in kubelab.select({"app": "web"}, pods)])   # Service-style selector
+</textarea>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="deployment">
+    <h2>A production-shaped Deployment</h2>
+    <pre><code class="language-yaml"># deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo
+  labels: {app.kubernetes.io/name: podinfo}
+  annotations:
+    kubernetes.io/change-cause: "podinfo 6.7.0"   # shown by rollout history
+spec:
+  replicas: 4
+  revisionHistoryLimit: 5            # old ReplicaSets kept for rollback
+  minReadySeconds: 5                 # a new Pod must stay Ready this long to count
+  progressDeadlineSeconds: 120       # mark the rollout failed if stuck this long
+  selector:
+    matchLabels: {app.kubernetes.io/name: podinfo}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                    # at most 1 Pod above replicas during a rollout
+      maxUnavailable: 0              # never fewer than 4 ready
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: podinfo}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: app
+          image: ghcr.io/stefanprodan/podinfo:6.7.0
+          ports: [{containerPort: 9898, name: http}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}}
+          livenessProbe: {httpGet: {path: /healthz, port: http}}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}</code></pre>
+    <p>Notice what's <em>not</em> here: no Pod names, no node names. The Deployment describes a template and a
+      count. Everything else follows.</p>
+  </section>
+
+  <section class="lesson-section" id="rolling">
+    <h2>Rolling updates</h2>
+    <p>Change anything in <code>spec.template</code> (the image, an env var, a label) and the Deployment starts a
+      rollout. Two numbers bound it:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Setting</th><th>Meaning</th><th>Percentages round</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>maxSurge</code></td><td>How many Pods may exist <strong>above</strong> <code>replicas</code></td><td>Up</td><td>25%</td></tr>
+        <tr><td><code>maxUnavailable</code></td><td>How many may be <strong>missing</strong> from <code>replicas</code></td><td>Down</td><td>25%</td></tr>
+      </tbody>
+    </table></div>
+    <p>So during a rollout: total Pods ≤ <code>replicas + maxSurge</code>, and ready Pods ≥
+      <code>replicas − maxUnavailable</code>. Both can't be zero, or the rollout could never take a step.</p>
+    <div class="viz" data-viz="rollout" data-config='{"replicas": 4, "maxSurge": 1, "maxUnavailable": 0}'></div>
+    <p>Try <code>maxSurge: 0, maxUnavailable: 1</code> (no extra capacity: good when the cluster is full), then
+      <code>25%</code> and <code>25%</code> with 10 replicas (the defaults), then <code>0</code> and <code>0</code>.</p>
+    <div class="runnable" data-title="The bounds for any settings">
+<textarea>
+import kubelab
+
+for replicas, surge, unavailable in [(4, 1, 0), (10, "25%", "25%"), (3, "25%", "25%"), (4, 0, 1)]:
+    most, least = kubelab.rollout_bounds(replicas, surge, unavailable)
+    print(f"replicas={replicas:2} surge={surge!s:>4} unavailable={unavailable!s:>4} -> at most {most} Pods, at least {least} ready")
+</textarea>
+    </div>
+    <p>Two fields make rollouts safer. <code>minReadySeconds</code> requires a new Pod to stay Ready for a while
+      before it counts as available, which catches apps that pass one readiness check and then crash.
+      <code>progressDeadlineSeconds</code> marks the rollout as failed (<code>Progressing=False</code>,
+      reason <code>ProgressDeadlineExceeded</code>) if it makes no progress for that long. Kubernetes does
+      <strong>not</strong> roll back on its own; your pipeline or you do that.</p>
+    <aside class="callout think"><p>With <code>maxUnavailable: 0</code>, you push an image tag that doesn't exist.
+      What happens to traffic? What does <code>kubectl get rs</code> show? Check your answer in the lab.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="rollbacks">
+    <h2>Driving rollouts</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Action</th><th>Command</th></tr></thead>
+      <tbody>
+        <tr><td>Change the image (starts a rollout)</td><td><code>kubectl set image deploy/podinfo app=ghcr.io/stefanprodan/podinfo:6.7.1</code></td></tr>
+        <tr><td>Watch it</td><td><code>kubectl rollout status deploy/podinfo</code> (exits non-zero if the deadline passes)</td></tr>
+        <tr><td>Record why</td><td><code>kubectl annotate deploy/podinfo kubernetes.io/change-cause="6.7.1" --overwrite</code></td></tr>
+        <tr><td>History</td><td><code>kubectl rollout history deploy/podinfo</code></td></tr>
+        <tr><td>Roll back one revision, or to a specific one</td><td><code>kubectl rollout undo deploy/podinfo</code>, <code>--to-revision=2</code></td></tr>
+        <tr><td>Batch several edits into one rollout</td><td><code>kubectl rollout pause deploy/podinfo</code> … edit … <code>kubectl rollout resume deploy/podinfo</code></td></tr>
+        <tr><td>Restart every Pod (e.g. after a Secret changed)</td><td><code>kubectl rollout restart deploy/podinfo</code></td></tr>
+        <tr><td>Scale (doesn't create a revision)</td><td><code>kubectl scale deploy/podinfo --replicas=6</code></td></tr>
+      </tbody>
+    </table></div>
+    <p>A rollback is just another rollout: the Deployment copies an old ReplicaSet's template back and gives it a
+      <em>new</em> revision number. Scaling never creates a revision, because <code>replicas</code> isn't part of the
+      template.</p>
+    <aside class="callout note"><p><code>kubectl rollout restart</code> works by adding a timestamp annotation to the
+      template. That's a template change, so it's a normal rolling update with all its safety.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="recreate">
+    <h2>The Recreate strategy</h2>
+    <p><code>strategy: {type: Recreate}</code> deletes every old Pod first, then creates the new ones. There is
+      downtime between the two. Use it only when two versions must never run at once: an app that holds an
+      exclusive lock, or a schema change old code can't survive. For everything else, use RollingUpdate and make
+      your app tolerate a short overlap.</p>
+  </section>
+
+  <section class="lesson-section" id="other-controllers">
+    <h2>The other workload controllers</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Controller</th><th>Use it for</th><th>Pod identity</th><th>Storage</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td>Deployment</td><td>Stateless, interchangeable replicas</td><td>Random suffixes</td><td>Shared or none</td><td>Web and API servers</td></tr>
+        <tr><td>StatefulSet</td><td>Stable identity, ordered start and stop</td><td><code>db-0</code>, <code>db-1</code> with stable DNS</td><td>One volume per replica</td><td>PostgreSQL, Kafka, etcd</td></tr>
+        <tr><td>DaemonSet</td><td>One Pod on every (matching) node</td><td>One per node</td><td>Often the node's disk</td><td>Log agents, CNI, node exporters</td></tr>
+        <tr><td>Job</td><td>Run to completion, with retries</td><td>Random</td><td>Optional</td><td>Migrations, batch exports</td></tr>
+        <tr><td>CronJob</td><td>Jobs on a schedule</td><td>Random</td><td>Optional</td><td>Nightly backups, reports</td></tr>
+        <tr><td>ReplicaSet</td><td>Don't use directly; Deployments manage them</td><td>—</td><td>—</td><td>—</td></tr>
+      </tbody>
+    </table></div>
+    <p>StatefulSets need persistent storage and headless Services, so they get full treatment in Stage 2. For now,
+      know when you'd reach for one.</p>
+  </section>
+
+  <section class="lesson-section" id="jobs">
+    <h2>Jobs and CronJobs</h2>
+    <pre><code class="language-yaml"># cronjob.yaml: print the date every five minutes
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: ticker}
+spec:
+  schedule: "*/5 * * * *"             # minute hour day-of-month month day-of-week
+  timeZone: America/Chicago           # otherwise the controller's time zone (usually UTC)
+  concurrencyPolicy: Forbid           # skip a run if the last one is still going
+  startingDeadlineSeconds: 120        # give up on a missed run after 2 minutes
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 2                 # retries before the Job is marked failed
+      activeDeadlineSeconds: 60       # kill a run that takes longer
+      ttlSecondsAfterFinished: 3600   # clean up finished Jobs
+      template:
+        spec:
+          restartPolicy: OnFailure    # Jobs need OnFailure or Never
+          containers:
+            - name: tick
+              image: busybox:1.36
+              command: ['sh', '-c', 'date; echo hello from $(hostname)']</code></pre>
+    <div class="scroll"><table>
+      <thead><tr><th>Field</th><th>What it controls</th></tr></thead>
+      <tbody>
+        <tr><td><code>completions</code> / <code>parallelism</code></td><td>How many successful Pods a Job needs, and how many run at once</td></tr>
+        <tr><td><code>backoffLimit</code></td><td>Failures allowed before the Job fails (default 6)</td></tr>
+        <tr><td><code>activeDeadlineSeconds</code></td><td>Wall-clock limit for the whole Job</td></tr>
+        <tr><td><code>concurrencyPolicy</code></td><td><code>Allow</code> (default), <code>Forbid</code>, or <code>Replace</code> the running Job</td></tr>
+        <tr><td><code>restartPolicy</code></td><td><code>OnFailure</code> retries in the same Pod; <code>Never</code> makes a new Pod per attempt (keeps the failed ones for logs)</td></tr>
+      </tbody>
+    </table></div>
+    <pre data-label="Terminal"><code class="language-bash">kubectl create job once --from=cronjob/ticker    # run a CronJob now
+kubectl get jobs,pods -l job-name=once
+kubectl logs job/once</code></pre>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Five exercises on rollout maths, selectors, choosing controllers, and history.</p>
+
+    <div class="exercise" data-id="m03-e1" data-title="Rollout bounds by hand">
+      <div class="exercise-prompt">
+        <p>Without using <code>kubelab.rollout_bounds</code>, write <code>bounds(replicas, max_surge,
+          max_unavailable)</code> returning <code>(max_pods, min_ready)</code>. Each setting is an int or a string
+          like <code>"25%"</code>; percentages of <code>replicas</code> round <strong>up</strong> for surge and
+          <strong>down</strong> for unavailable. The tests compare you with kubelab.</p>
+      </div>
+<textarea class="starter">
+import math
+
+def bounds(replicas, max_surge, max_unavailable):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+import kubelab
+
+CASES = [(4, 1, 0), (10, "25%", "25%"), (3, "25%", "25%"), (4, 0, 1), (1, "25%", "25%"), (7, "50%", "10%"), (5, 2, "40%")]
+
+def test_against_kubelab():
+    for case in CASES:
+        assert bounds(*case) == kubelab.rollout_bounds(*case), f"bounds{case} should be {kubelab.rollout_bounds(*case)}"
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Write a helper that turns <code>"25%"</code> into
+        <code>replicas * 25 / 100</code> and rounds with <code>math.ceil</code> or <code>math.floor</code>, and
+        turns ints into themselves.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import math
+
+def resolve(value, replicas, up):
+    text = str(value)
+    if text.endswith("%"):
+        exact = replicas * float(text[:-1]) / 100
+        return math.ceil(exact) if up else math.floor(exact)
+    return int(text)
+
+def bounds(replicas, max_surge, max_unavailable):
+    surge = resolve(max_surge, replicas, True)
+    unavailable = resolve(max_unavailable, replicas, False)
+    return replicas + surge, replicas - unavailable</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m03-e2" data-title="Overlapping Deployments">
+      <div class="exercise-prompt">
+        <p>Two Deployments fight when one's selector matches the other's Pod template labels. Write
+          <code>overlaps(deployments)</code> returning a sorted list of <code>(a, b)</code> name pairs
+          (<code>a &lt; b</code>) where <strong>either</strong> selector matches the other's template labels. Use
+          <code>kubelab.selector_matches</code>.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def overlaps(deployments):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def dep(name, selector, labels):
+    return {"metadata": {"name": name}, "spec": {"selector": selector, "template": {"metadata": {"labels": labels}}}}
+
+DEPS = [
+    dep("web", {"matchLabels": {"app": "web"}}, {"app": "web", "track": "stable"}),
+    dep("web-canary", {"matchLabels": {"app": "web", "track": "canary"}}, {"app": "web", "track": "canary"}),
+    dep("api", {"matchLabels": {"app": "api"}}, {"app": "api"}),
+]
+
+def test_overlap_found():
+    assert overlaps(DEPS) == [("web", "web-canary")], "web's selector also matches the canary's Pods"
+
+def test_no_overlap():
+    fixed = [dep("web", {"matchLabels": {"app": "web", "track": "stable"}}, {"app": "web", "track": "stable"}), DEPS[1], DEPS[2]]
+    assert overlaps(fixed) == []
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Loop over every pair with two indices <code>i &lt; j</code> and
+        check both directions.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def overlaps(deployments):
+    def parts(d):
+        return d["metadata"]["name"], d["spec"]["selector"], d["spec"]["template"]["metadata"]["labels"]
+    found = []
+    for i, a in enumerate(deployments):
+        for b in deployments[i + 1:]:
+            name_a, sel_a, labels_a = parts(a)
+            name_b, sel_b, labels_b = parts(b)
+            if kubelab.selector_matches(sel_a, labels_b) or kubelab.selector_matches(sel_b, labels_a):
+                found.append(tuple(sorted((name_a, name_b))))
+    return sorted(found)</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m03-e3" data-title="Pick the controller">
+      <div class="exercise-prompt">
+        <p>Write <code>choose(needs)</code> that returns the controller kind for a workload described by a dict with
+          boolean keys <code>stable_identity</code>, <code>every_node</code>, <code>runs_to_completion</code>, and an
+          optional <code>schedule</code> string. Precedence: a schedule means <code>"CronJob"</code>; otherwise
+          runs-to-completion means <code>"Job"</code>; otherwise every-node means <code>"DaemonSet"</code>; otherwise
+          stable identity means <code>"StatefulSet"</code>; otherwise <code>"Deployment"</code>. Missing keys are
+          false.</p>
+      </div>
+<textarea class="starter">
+def choose(needs):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def test_cases():
+    assert choose({}) == "Deployment"
+    assert choose({"stable_identity": True}) == "StatefulSet"
+    assert choose({"every_node": True}) == "DaemonSet"
+    assert choose({"runs_to_completion": True}) == "Job"
+    assert choose({"runs_to_completion": True, "schedule": "0 2 * * *"}) == "CronJob"
+    assert choose({"schedule": "@hourly", "every_node": True}) == "CronJob", "a schedule wins"
+      </script>
+      <details class="hint"><summary>Hint</summary><p>A chain of <code>if</code> statements in the given order, using
+        <code>needs.get(key)</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def choose(needs):
+    if needs.get("schedule"):
+        return "CronJob"
+    if needs.get("runs_to_completion"):
+        return "Job"
+    if needs.get("every_node"):
+        return "DaemonSet"
+    if needs.get("stable_identity"):
+        return "StatefulSet"
+    return "Deployment"</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m03-e4" data-title="Where does undo go?">
+      <div class="exercise-prompt">
+        <p><code>history</code> is a list of revision numbers kept by a Deployment (for example
+          <code>[2, 4, 5]</code>; old ones were pruned by <code>revisionHistoryLimit</code>). Write
+          <code>undo_target(history, to_revision=None)</code>: with no <code>to_revision</code>, return the revision
+          just before the newest; otherwise return <code>to_revision</code> if it's in history. Raise
+          <code>ValueError</code> when there's nothing to roll back to or the revision isn't kept.</p>
+      </div>
+<textarea class="starter">
+def undo_target(history, to_revision=None):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def raises(fn):
+    try:
+        fn()
+    except ValueError:
+        return True
+    return False
+
+def test_previous():
+    assert undo_target([2, 4, 5]) == 4
+    assert undo_target([5, 2, 4]) == 4, "history may arrive unsorted"
+
+def test_explicit():
+    assert undo_target([2, 4, 5], to_revision=2) == 2
+
+def test_errors():
+    assert raises(lambda: undo_target([7])), "one revision: nothing to roll back to"
+    assert raises(lambda: undo_target([2, 4, 5], to_revision=3)), "revision 3 was pruned"
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Sort the history; the target is <code>ordered[-2]</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def undo_target(history, to_revision=None):
+    if to_revision is not None:
+        if to_revision not in history:
+            raise ValueError(f"revision {to_revision} is not in the history")
+        return to_revision
+    ordered = sorted(history)
+    if len(ordered) &lt; 2:
+        raise ValueError("no previous revision to roll back to")
+    return ordered[-2]</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m03-e5" data-title="Will this CronJob validate?">
+      <div class="exercise-prompt">
+        <p>Write <code>cronjob_for(name, schedule, image, command)</code> returning a CronJob dict that
+          <code>kubelab.check_object</code> accepts, with <code>concurrencyPolicy: Forbid</code>,
+          <code>backoffLimit: 2</code>, <code>restartPolicy: OnFailure</code>, and one container named
+          <code>"task"</code>.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def cronjob_for(name, schedule, image, command):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+import kubelab
+
+def test_valid():
+    cj = cronjob_for("report", "0 2 * * *", "busybox:1.36", ["sh", "-c", "echo hi"])
+    assert kubelab.check_object(cj) == [], kubelab.check_object(cj)
+    assert kubelab.dig(cj, "spec.concurrencyPolicy") == "Forbid"
+    assert kubelab.dig(cj, "spec.jobTemplate.spec.backoffLimit") == 2
+    assert kubelab.dig(cj, "spec.jobTemplate.spec.template.spec.containers.0.name") == "task"
+    assert kubelab.dig(cj, "spec.jobTemplate.spec.template.spec.containers.0.command") == ["sh", "-c", "echo hi"]
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Copy the nesting from the cronjob.yaml above:
+        <code>spec.jobTemplate.spec.template.spec</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def cronjob_for(name, schedule, image, command):
+    pod = {"restartPolicy": "OnFailure", "containers": [{"name": "task", "image": image, "command": command}]}
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": {"name": name},
+        "spec": {
+            "schedule": schedule,
+            "concurrencyPolicy": "Forbid",
+            "jobTemplate": {"spec": {"backoffLimit": 2, "template": {"spec": pod}}},
+        },
+    }</code></pre></details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Lab: a zero-downtime release</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Lab m03-lab1</span><span class="w-title">Ship podinfo with no dropped requests, and a CronJob beside it</span></div>
+      <div class="widget-body">
+        <p>Write <code>deployment.yaml</code> for four podinfo replicas that can never drop below four ready Pods
+          during a rollout, with safe rollout settings and a recorded change cause. Add <code>cronjob.yaml</code>
+          for a scheduled task that never overlaps itself. Then fill in <code>rollout.toml</code> with the bounds and
+          rollback facts for your own settings. The live check applies both, rolls to 6.7.1, rolls back, and checks
+          the history.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi run start m03-lab1
+# edit work/m03-lab1/deployment.yaml, cronjob.yaml, rollout.toml
+pixi run grade m03-lab1
+pixi run grade-live m03-lab1     # optional: real rollout and rollback on the primer cluster</code></pre>
+        <ul class="checklist" data-id="m03-lab1">
+          <li>4 replicas, <code>maxUnavailable: 0</code>, <code>maxSurge</code> of 1</li>
+          <li><code>minReadySeconds</code>, <code>progressDeadlineSeconds</code>, and <code>revisionHistoryLimit</code> set</li>
+          <li>Readiness probe on a named port; the Pod passes the restricted settings</li>
+          <li>CronJob with <code>concurrencyPolicy: Forbid</code>, a time zone, history limits, and a deadline</li>
+          <li><code>rollout.toml</code> answers match your manifests</li>
+          <li><code>pixi run grade m03-lab1</code> passes</li>
+        </ul>
+        <p><strong>Stretch:</strong> run a request loop during the live rollout (see the lab README) and prove it
+          never prints an error.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m03-quiz">
+<script type="application/json">
+{"title": "Deployments and Workloads quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "With <code>replicas: 4</code>, <code>maxSurge: 1</code>, <code>maxUnavailable: 0</code>, what's the most Pods that can exist mid-rollout?", "options": ["4", "5", "6", "8"], "answer": 1, "explanation": "<p>replicas + maxSurge = 5. Ready Pods never drop below 4 − 0 = 4.</p>"},
+  {"type": "single", "prompt": "<code>replicas: 10</code> with the default 25%/25%. What are the bounds?", "options": ["At most 12, at least 8 ready", "At most 13, at least 8 ready", "At most 13, at least 7 ready", "At most 12, at least 7 ready"], "answer": 1, "explanation": "<p>Surge rounds up: ceil(2.5) = 3, so 13. Unavailable rounds down: floor(2.5) = 2, so 8.</p>"},
+  {"type": "single", "prompt": "Which change starts a new rollout?", "options": ["<code>kubectl scale --replicas=6</code>", "Changing an env var in the Pod template", "Adding a label to the Deployment's own metadata", "Changing <code>revisionHistoryLimit</code>"], "answer": 1, "explanation": "<p>Only changes to <code>spec.template</code> create a new ReplicaSet and revision.</p>"},
+  {"type": "single", "prompt": "The new image tag doesn't exist and <code>maxUnavailable: 0</code>. What happens to traffic?", "options": ["Outage", "Old Pods keep serving; the rollout stalls", "Kubernetes rolls back automatically", "Half the requests fail"], "answer": 1, "explanation": "<p>Old Pods are only removed when new ones become available. After <code>progressDeadlineSeconds</code> the rollout is marked failed; you roll back.</p>"},
+  {"type": "single", "prompt": "What does <code>minReadySeconds: 10</code> add?", "options": ["Pods start 10 seconds later", "A new Pod must stay Ready for 10 seconds before it counts as available", "Probes run every 10 seconds", "Rollouts time out after 10 seconds"], "answer": 1, "explanation": "<p>It catches Pods that pass a readiness check once and then crash.</p>"},
+  {"type": "single", "prompt": "Why is a Deployment's <code>spec.selector</code> immutable?", "options": ["For performance", "Changing it would orphan the existing Pods and ReplicaSets", "etcd can't update it", "Selectors are cached forever"], "answer": 1, "explanation": "<p>The selector is how the Deployment finds its children. Create a new Deployment to change it.</p>"},
+  {"type": "single", "prompt": "What does <code>kubectl rollout undo</code> actually do?", "options": ["Deletes the Deployment", "Copies the previous ReplicaSet's template back, as a new revision", "Restores an etcd backup", "Scales the Deployment to zero"], "answer": 1, "explanation": "<p>A rollback is a normal rollout with an old template, so it gets a new revision number.</p>"},
+  {"type": "single", "prompt": "When is <code>strategy: Recreate</code> the right choice?", "options": ["Always: it's faster", "When two versions must never run at the same time", "For stateless web apps", "To save memory"], "answer": 1, "explanation": "<p>Recreate has downtime by design. Use it only when overlap is unsafe.</p>"},
+  {"type": "single", "prompt": "Which controller fits a three-replica database that needs stable names and its own disk per replica?", "options": ["Deployment", "DaemonSet", "StatefulSet", "Job"], "answer": 2, "explanation": "<p>StatefulSets give ordinal names, stable DNS, and a volume per replica.</p>"},
+  {"type": "single", "prompt": "You need a log agent on every node, including nodes added later. Which controller?", "options": ["Deployment with replicas = node count", "DaemonSet", "CronJob", "StatefulSet"], "answer": 1, "explanation": "<p>A DaemonSet runs one Pod per matching node and adds one automatically when a node joins.</p>"},
+  {"type": "multi", "prompt": "Which <code>restartPolicy</code> values can a Job's Pod template use?", "options": ["Always", "OnFailure", "Never"], "answer": [1, 2], "explanation": "<p>A Job must be able to finish, so <code>Always</code> is rejected.</p>"},
+  {"type": "single", "prompt": "A nightly CronJob sometimes runs longer than a day and two copies overlap. What fixes it?", "options": ["<code>backoffLimit: 0</code>", "<code>concurrencyPolicy: Forbid</code>", "<code>restartPolicy: Never</code>", "<code>suspend: true</code>"], "answer": 1, "explanation": "<p>Forbid skips a run while the previous one is still active. <code>Replace</code> would kill the old one instead.</p>"},
+  {"type": "text", "prompt": "Which annotation does <code>kubectl rollout history</code> show in its CHANGE-CAUSE column?", "answer": ["kubernetes.io/change-cause"], "explanation": "<p>Set it with <code>kubectl annotate deploy/NAME kubernetes.io/change-cause=\"...\" --overwrite</code> or in the manifest.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>Deployments manage ReplicaSets (one per template version), which manage Pods. Selectors tie them together
+        and must match the template's labels, without overlapping other controllers.</li>
+      <li>Rolling updates keep total ≤ replicas + maxSurge (rounded up) and ready ≥ replicas − maxUnavailable
+        (rounded down).</li>
+      <li><code>minReadySeconds</code> and <code>progressDeadlineSeconds</code> make rollouts honest; rollbacks are
+        new revisions made from old templates.</li>
+      <li>Pick by need: Deployment (stateless), StatefulSet (identity and disks), DaemonSet (per node), Job (finish),
+        CronJob (schedule).</li>
+      <li>Jobs need <code>OnFailure</code> or <code>Never</code>; CronJobs want a time zone, a concurrency policy,
+        deadlines, and history limits.</li>
+    </ul>
+    <div class="flashcards" data-title="Deployments and workloads">
+      <script type="application/json">
+      [{"front": "Deployment → ? → Pods", "back": "ReplicaSets: one per Pod template version."},
+       {"front": "What starts a rollout?", "back": "Any change to spec.template. Scaling doesn't."},
+       {"front": "maxSurge rounding / maxUnavailable rounding", "back": "Surge rounds up; unavailable rounds down."},
+       {"front": "Default rollout bounds", "back": "25% surge, 25% unavailable."},
+       {"front": "minReadySeconds", "back": "How long a new Pod must stay Ready before it counts as available."},
+       {"front": "progressDeadlineSeconds", "back": "Marks a stuck rollout as failed (ProgressDeadlineExceeded). It doesn't roll back."},
+       {"front": "rollout undo", "back": "Re-applies an old ReplicaSet's template as a new revision."},
+       {"front": "Recreate strategy", "back": "Kill all old Pods, then start new ones. Downtime by design."},
+       {"front": "StatefulSet vs Deployment", "back": "Stable names, stable DNS, a volume per replica, ordered rollout."},
+       {"front": "concurrencyPolicy: Forbid", "back": "Skip a CronJob run while the previous Job is still active."},
+       {"front": "Overlapping selectors", "back": "Two controllers selecting the same Pods fight. Add a distinguishing label."}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/">Kubernetes: Deployments</a></li>
+      <li><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/">Labels and selectors</a></li>
+      <li><a href="https://kubernetes.io/docs/concepts/workloads/controllers/job/">Jobs</a> and <a href="https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/">CronJobs</a></li>
+      <li>Next: <a href="../reference/roadmap.html">the roadmap</a>, where Stage 2 picks up with Services and Gateway API</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>
