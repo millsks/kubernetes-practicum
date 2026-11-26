@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M02 · Pods · Kubernetes Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/kubelab-src.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-k8s.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-module="m02">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Stage 1 · Foundations · Module 02</p>
+    <h1>Pods</h1>
+    <p class="lede">The Pod is the smallest thing Kubernetes schedules: one or more containers that share a network
+      address and storage, placed together on one node. Every higher-level object (Deployments, Jobs, StatefulSets)
+      exists to create and replace Pods. Get Pods right, with health probes, resources, and security, and everything
+      built on them behaves.</p>
+    <div class="lesson-meta"><span>⏱ ~2.5 hours</span><span>Prerequisites: <a href="m01-how-kubernetes-thinks.html">M01 How Kubernetes Thinks</a></span></div>
+    <ul class="objectives">
+      <li>Explain what containers in one Pod share, and when to put two containers in the same Pod</li>
+      <li>Read the Pod phases and container states, and know what each restart policy does</li>
+      <li>Choose between startup, readiness, and liveness probes, and avoid the classic probe mistakes</li>
+      <li>Set requests and limits, predict the QoS class, and explain throttling vs OOM kills</li>
+      <li>Use init containers and native sidecars</li>
+      <li>Write a Pod that meets the <code>restricted</code> Pod Security Standard</li>
+      <li>Debug a Pod systematically with describe, logs, exec, port-forward, and ephemeral containers</li>
+    </ul>
+  </header>
+
+  <section class="lesson-section" id="anatomy">
+    <h2>What a Pod is</h2>
+    <p>A Pod wraps one or more containers that are always scheduled <strong>together</strong>, on the same node.
+      They share:</p>
+    <ul>
+      <li><strong>One network namespace</strong>: one IP address and one port space. Containers in a Pod reach each
+        other on <code>localhost</code>, so two of them can't both listen on 8080.</li>
+      <li><strong>Volumes</strong> declared on the Pod, which any container can mount.</li>
+      <li><strong>A lifecycle</strong>: the Pod is created, runs, and is deleted as a unit.</li>
+    </ul>
+    <figure class="figure">
+      <svg class="diagram" viewBox="0 0 720 240" role="img" aria-label="A Pod with an init container, an app container and a sidecar sharing a volume and network">
+        <rect x="10" y="10" width="700" height="220" rx="10" fill="var(--bg-sunk)" stroke="var(--border-strong)"/>
+        <text x="24" y="30" font-size="13" font-weight="600" fill="var(--fg)">Pod · one IP (10.244.1.7) · one node</text>
+        <rect x="30" y="50" width="170" height="60" rx="8" fill="none" stroke="var(--fg-muted)" stroke-dasharray="4 3"/>
+        <text x="115" y="75" text-anchor="middle" font-size="13" fill="var(--fg)">init: migrate</text>
+        <text x="115" y="93" text-anchor="middle" font-size="11" fill="var(--fg-muted)">runs first, then exits</text>
+        <rect x="240" y="50" width="200" height="80" rx="8" fill="var(--accent)"/>
+        <text x="340" y="84" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-fg)">app</text>
+        <text x="340" y="104" text-anchor="middle" font-size="11" fill="var(--accent-fg)">:9898 · probes</text>
+        <rect x="480" y="50" width="200" height="80" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="580" y="84" text-anchor="middle" font-size="14" font-weight="600" fill="var(--fg)">sidecar: log shipper</text>
+        <text x="580" y="104" text-anchor="middle" font-size="11" fill="var(--fg-muted)">init + restartPolicy: Always</text>
+        <rect x="240" y="160" width="200" height="50" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="340" y="190" text-anchor="middle" font-size="13" fill="var(--fg)">shared volume (emptyDir)</text>
+        <rect x="480" y="160" width="200" height="50" rx="8" fill="var(--bg-elev)" stroke="var(--border-strong)"/>
+        <text x="580" y="190" text-anchor="middle" font-size="13" fill="var(--fg)">localhost network</text>
+        <line x1="200" y1="80" x2="238" y2="85" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="340" y1="130" x2="340" y2="158" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="580" y1="130" x2="580" y2="158" stroke="var(--fg)" stroke-width="1.5"/>
+        <line x1="440" y1="90" x2="478" y2="90" stroke="var(--fg)" stroke-width="1.5"/>
+      </svg>
+      <figcaption>Put containers in one Pod only when they must share a lifecycle, a network, or files: an app and
+        its log shipper or proxy. Two independent services belong in two Pods.</figcaption>
+    </figure>
+    <aside class="callout warn"><p>A Pod you create directly (a <strong>bare Pod</strong>) is never recreated if it
+      or its node dies. You'll use bare Pods in this module to learn; real workloads use a controller (M03).</p></aside>
+  </section>
+
+  <section class="lesson-section" id="first-pod">
+    <h2>Your first Pod</h2>
+    <p>The course uses <a href="https://github.com/stefanprodan/podinfo">podinfo</a>, a tiny Go web app built for
+      Kubernetes demos. It has health endpoints, a version page, and switches to make it misbehave on purpose.</p>
+    <pre><code class="language-yaml"># pod.yaml: the minimum
+apiVersion: v1
+kind: Pod
+metadata:
+  name: podinfo
+  labels: {app.kubernetes.io/name: podinfo}
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanprodan/podinfo:6.7.1
+      ports: [{containerPort: 9898, name: http}]</code></pre>
+    <pre data-label="Terminal"><code class="language-bash">kubectl apply -f pod.yaml
+kubectl get pod podinfo -o wide -w        # Ctrl-C once it's Running
+kubectl describe pod podinfo | tail -15   # the Events tell the story
+kubectl port-forward pod/podinfo 9898:9898 &amp;
+curl -s localhost:9898 | head
+kill %1</code></pre>
+    <p>Names matter: <code>metadata.name</code> must be a DNS-1123 subdomain (lowercase letters, digits,
+      <code>-</code> and <code>.</code>), container names and port names must be DNS labels, and port names are at
+      most 15 characters. <code>kubelab.check_object</code> enforces the same rules as the API server.</p>
+  </section>
+
+  <section class="lesson-section" id="lifecycle">
+    <h2>Lifecycle: phases, states, restarts</h2>
+    <div class="two-col">
+      <div>
+        <h4>Pod phase</h4>
+        <div class="scroll"><table><tbody>
+          <tr><td><code>Pending</code></td><td>Accepted, but not running yet: waiting to be scheduled, pulling images, or mounting volumes</td></tr>
+          <tr><td><code>Running</code></td><td>Bound to a node; at least one container running or restarting</td></tr>
+          <tr><td><code>Succeeded</code></td><td>Every container exited 0 and won't restart</td></tr>
+          <tr><td><code>Failed</code></td><td>Every container stopped, at least one with an error</td></tr>
+          <tr><td><code>Unknown</code></td><td>The node stopped reporting</td></tr>
+        </tbody></table></div>
+      </div>
+      <div>
+        <h4>Container state</h4>
+        <div class="scroll"><table><tbody>
+          <tr><td><code>Waiting</code></td><td>Not running yet, with a <em>reason</em>: <code>ContainerCreating</code>, <code>ImagePullBackOff</code>, <code>CrashLoopBackOff</code>…</td></tr>
+          <tr><td><code>Running</code></td><td>Executing</td></tr>
+          <tr><td><code>Terminated</code></td><td>Exited, with an exit code and a reason such as <code>Completed</code>, <code>Error</code>, or <code>OOMKilled</code></td></tr>
+        </tbody></table></div>
+      </div>
+    </div>
+    <p><code>spec.restartPolicy</code> decides what the kubelet does when a container exits:
+      <code>Always</code> (the default, required for Deployments), <code>OnFailure</code>, or <code>Never</code>
+      (both for Jobs). Restarts back off exponentially (10 s, 20 s, 40 s… up to five minutes), and while waiting the
+      container shows <code>CrashLoopBackOff</code>. The restart happens <em>inside the same Pod on the same
+      node</em>; it isn't rescheduled.</p>
+    <div class="runnable" data-predict data-title="Predict: the back-off schedule">
+<textarea>
+delay, waits = 10, []
+for attempt in range(7):
+    waits.append(delay)
+    delay = min(delay * 2, 300)
+print(waits)
+</textarea>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="probes">
+    <h2>Health probes</h2>
+    <p>A running process isn't necessarily a healthy one. Probes let the kubelet ask your app how it's doing.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Probe</th><th>Question it answers</th><th>On failure</th><th>Classic mistake</th></tr></thead>
+      <tbody>
+        <tr><td><code>startupProbe</code></td><td>Has the app finished starting?</td><td>Keeps checking; the other probes wait until it passes</td><td>Missing on slow starters, so liveness kills them mid-boot</td></tr>
+        <tr><td><code>readinessProbe</code></td><td>Can it take traffic right now?</td><td>Removed from Service endpoints; <strong>not</strong> restarted</td><td>Omitting it, so traffic arrives before the app can serve</td></tr>
+        <tr><td><code>livenessProbe</code></td><td>Is the process wedged?</td><td>Container is <strong>restarted</strong></td><td>Checking the database here: one DB blip restarts every replica at once</td></tr>
+      </tbody>
+    </table></div>
+    <pre><code class="language-yaml">    - name: app
+      image: ghcr.io/stefanprodan/podinfo:6.7.1
+      ports: [{containerPort: 9898, name: http}]
+      startupProbe:                          # up to 30 × 2s = 60s to boot
+        httpGet: {path: /healthz, port: http}
+        failureThreshold: 30
+        periodSeconds: 2
+      readinessProbe:
+        httpGet: {path: /readyz, port: http}
+        periodSeconds: 5
+      livenessProbe:
+        httpGet: {path: /healthz, port: http}
+        periodSeconds: 10
+        failureThreshold: 3</code></pre>
+    <p>Probe handlers are <code>httpGet</code> (a 2xx or 3xx counts as success), <code>tcpSocket</code>,
+      <code>exec</code> (exit 0 is success), and <code>grpc</code>. Refer to ports <strong>by name</strong>
+      (<code>port: http</code>) so changing the number in one place can't break the probe.</p>
+    <aside class="callout tip"><p><strong>Remember:</strong> liveness checks <em>this process only</em>. Readiness can
+      consider whether the app can do useful work. Startup protects slow boots.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="resources">
+    <h2>Requests, limits, and QoS</h2>
+    <div class="scroll"><table>
+      <thead><tr><th></th><th>Request</th><th>Limit</th></tr></thead>
+      <tbody>
+        <tr><td>Used by</td><td>The scheduler, to place the Pod (the node must have this much unreserved)</td><td>The kernel (cgroups), at runtime</td></tr>
+        <tr><td>CPU above it</td><td>Allowed if the node has spare CPU</td><td>Throttled: slower, never killed</td></tr>
+        <tr><td>Memory above it</td><td>Allowed until the node runs short, then evicted first</td><td><strong>OOMKilled</strong>: exit code 137</td></tr>
+      </tbody>
+    </table></div>
+    <p>Quantities have units. CPU is in cores: <code>250m</code> is a quarter of a core ("milli"). Memory is in
+      bytes: <code>128Mi</code> is 128 × 2<sup>20</sup> (binary), while <code>128M</code> is 128 × 10<sup>6</sup>
+      (decimal), about 5% smaller.</p>
+    <p>From requests and limits, the kubelet assigns a <strong>QoS class</strong> that decides who is evicted first
+      when a node runs out of memory:</p>
+    <div class="scroll"><table>
+      <thead><tr><th>QoS class</th><th>When</th><th>Evicted</th></tr></thead>
+      <tbody>
+        <tr><td>Guaranteed</td><td>Every container has CPU and memory limits, and requests equal limits</td><td>Last</td></tr>
+        <tr><td>Burstable</td><td>At least one request or limit is set, but not Guaranteed</td><td>Middle</td></tr>
+        <tr><td>BestEffort</td><td>No requests or limits at all</td><td>First</td></tr>
+      </tbody>
+    </table></div>
+    <div class="runnable" data-title="Quantities and QoS">
+<textarea>
+import kubelab
+
+print(kubelab.parse_cpu("250m"), "cores")
+print(kubelab.parse_memory("128Mi"), "bytes vs", kubelab.parse_memory("128M"))
+
+def spec(requests, limits):
+    return {"containers": [{"name": "app", "image": "x:1", "resources": {"requests": requests, "limits": limits}}]}
+
+print(kubelab.qos_class(spec({}, {})))
+print(kubelab.qos_class(spec({"cpu": "100m", "memory": "64Mi"}, {"memory": "128Mi"})))
+print(kubelab.qos_class(spec({}, {"cpu": "500m", "memory": "256Mi"})))   # requests default to limits
+</textarea>
+    </div>
+    <aside class="callout pro"><p>A good default for web apps: set CPU and memory <em>requests</em> to typical usage,
+      set a memory <em>limit</em>, and think twice before a CPU limit. CPU limits cause throttling, which shows up as
+      mysterious latency spikes even when the node is idle.</p></aside>
+  </section>
+
+  <section class="lesson-section" id="multi-container">
+    <h2>Init containers and native sidecars</h2>
+    <p><strong>Init containers</strong> run to completion, one after another, before the app containers start. Use
+      them to wait for a dependency, run a migration, or render a config file. A <strong>native sidecar</strong>
+      (stable since Kubernetes 1.33) is an init container with <code>restartPolicy: Always</code>: it starts before
+      the app, keeps running beside it, and stops after it, which is exactly what log shippers and proxies need.</p>
+    <pre><code class="language-yaml">spec:
+  initContainers:
+    - name: wait-for-db                 # classic init: must exit 0 before the app starts
+      image: busybox:1.36
+      command: ['sh', '-c', 'until nc -z db 5432; do echo waiting; sleep 2; done']
+    - name: log-shipper                 # native sidecar: keeps running
+      image: busybox:1.36
+      restartPolicy: Always
+      command: ['sh', '-c', 'tail -F /logs/app.log']
+      volumeMounts: [{name: logs, mountPath: /logs}]
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ['sh', '-c', 'while true; do date &gt;&gt; /logs/app.log; sleep 1; done']
+      volumeMounts: [{name: logs, mountPath: /logs}]
+  volumes:
+    - name: logs
+      emptyDir: {}</code></pre>
+    <p>While init containers run, <code>kubectl get pod</code> shows <code>Init:0/2</code>. If one keeps failing,
+      the Pod shows <code>Init:CrashLoopBackOff</code>; read it with <code>kubectl logs POD -c wait-for-db</code>.</p>
+  </section>
+
+  <section class="lesson-section" id="security">
+    <h2>Security context: the restricted standard</h2>
+    <p>By default a container may run as root and keep several Linux capabilities. Kubernetes defines three
+      <strong>Pod Security Standards</strong>: <code>privileged</code>, <code>baseline</code>, and
+      <code>restricted</code>. Write everything to <code>restricted</code>:</p>
+    <pre><code class="language-yaml">spec:
+  securityContext:                       # Pod level
+    runAsNonRoot: true
+    runAsUser: 10001                     # numeric: needed when the image's USER is a name
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      securityContext:                   # container level
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}</code></pre>
+    <aside class="callout warn"><p><code>runAsNonRoot: true</code> alone fails with
+      <code>CreateContainerConfigError</code> if the image declares a non-numeric user (such as
+      <code>USER app</code>), because the kubelet can't prove the name isn't root. Add a numeric
+      <code>runAsUser</code>.</p></aside>
+    <p><code>kubelab.warnings</code> flags what a manifest is missing. Fix the Pod below until the only warning left
+      is the one about it being a bare Pod.</p>
+    <div class="runnable" data-title="Lint a Pod">
+<textarea>
+import kubelab
+
+pod = kubelab.load_manifests("""
+apiVersion: v1
+kind: Pod
+metadata: {name: podinfo}
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/stefanprodan/podinfo:6.7.1
+      ports: [{containerPort: 9898, name: http}]
+""")[0]
+print("valid:", kubelab.check_object(pod) == [])
+for warning in kubelab.warnings(pod):
+    print("-", warning)
+</textarea>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="debugging">
+    <h2>Debugging a Pod</h2>
+    <pre class="mermaid">
+flowchart TD
+  A[Pod not working] --> B{STATUS?}
+  B -->|Pending| C[describe → Events: FailedScheduling? PVC?]
+  B -->|ImagePullBackOff / ErrImagePull| D[describe → Failed to pull: tag? registry? kind load?]
+  B -->|CreateContainerConfigError| E[describe → missing Secret / ConfigMap / key]
+  B -->|CrashLoopBackOff| F[logs --previous → exit code, OOMKilled?]
+  B -->|Running 0/1| G[describe → Readiness probe failed: path, port, timing]
+    </pre>
+    <div class="scroll"><table>
+      <thead><tr><th>Need</th><th>Command</th></tr></thead>
+      <tbody>
+        <tr><td>What Kubernetes did to it</td><td><code>kubectl describe pod POD</code> (read Events)</td></tr>
+        <tr><td>What the app said, including the crash before this restart</td><td><code>kubectl logs POD --previous</code>, <code>-c NAME</code> for one container</td></tr>
+        <tr><td>A shell inside</td><td><code>kubectl exec -it POD -- sh</code></td></tr>
+        <tr><td>Reach it from your Mac</td><td><code>kubectl port-forward pod/POD 9898:9898</code></td></tr>
+        <tr><td>A throwaway client in the cluster</td><td><code>kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh</code></td></tr>
+        <tr><td>Tools in an image that has none</td><td><code>kubectl debug -it POD --image=busybox:1.36 --target=app</code> (ephemeral container)</td></tr>
+        <tr><td>The exact termination reason</td><td><code>kubectl get pod POD -o jsonpath='{.status.containerStatuses[0].lastState}'</code></td></tr>
+      </tbody>
+    </table></div>
+    <p><code>kubelab.pod_issue</code> applies the same decision tree to a Pod's status, reporting the root cause
+      (an <code>OOMKilled</code> last state beats the <code>CrashLoopBackOff</code> it causes):</p>
+    <div class="runnable" data-title="Diagnose from status">
+<textarea>
+import kubelab
+
+pod = {"status": {"phase": "Running", "containerStatuses": [{
+    "name": "app", "ready": False,
+    "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+    "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}}}]}}
+issue = kubelab.pod_issue(pod)
+print(issue.reason, "in", issue.container)
+print(issue.hint)
+</textarea>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="practice">
+    <h2>Practice</h2>
+    <p>Five exercises on quantities, probes, hardening, and diagnosis.</p>
+
+    <div class="exercise" data-id="m02-e1" data-title="Millicores">
+      <div class="exercise-prompt">
+        <p>Write <code>millicores(quantity)</code> that converts a CPU quantity to whole millicores:
+          <code>"250m"</code> → 250, <code>"1.5"</code> → 1500, <code>2</code> → 2000. Round to the nearest integer.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def millicores(quantity):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def test_values():
+    assert millicores("250m") == 250
+    assert millicores("1.5") == 1500
+    assert millicores(2) == 2000
+    assert millicores("0.1") == 100, "watch out for floating point: round, don't truncate"
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>kubelab.parse_cpu</code> returns cores as a float.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def millicores(quantity):
+    return round(kubelab.parse_cpu(quantity) * 1000)</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m02-e2" data-title="Memory headroom">
+      <div class="exercise-prompt">
+        <p>Write <code>headroom(container)</code> that returns how many bytes a container may grow above its memory
+          request before it's OOM-killed: limit minus request. Return <code>None</code> when there's no memory limit
+          (no ceiling). A missing request counts as equal to the limit.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def headroom(container):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def c(requests=None, limits=None):
+    return {"name": "app", "resources": {"requests": requests or {}, "limits": limits or {}}}
+
+def test_headroom():
+    assert headroom(c({"memory": "64Mi"}, {"memory": "128Mi"})) == 64 * 2**20
+
+def test_no_limit():
+    assert headroom(c({"memory": "64Mi"})) is None
+
+def test_request_defaults_to_limit():
+    assert headroom(c(None, {"memory": "1Gi"})) == 0
+
+def test_no_resources():
+    assert headroom({"name": "app"}) is None
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Read the two values with <code>.get()</code> and convert with
+        <code>kubelab.parse_memory</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def headroom(container):
+    resources = container.get("resources") or {}
+    limit = (resources.get("limits") or {}).get("memory")
+    if limit is None:
+        return None
+    request = (resources.get("requests") or {}).get("memory", limit)
+    return kubelab.parse_memory(limit) - kubelab.parse_memory(request)</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m02-e3" data-title="Broken probe ports">
+      <div class="exercise-prompt">
+        <p>Write <code>broken_probes(container)</code> that returns a sorted list of the probe names
+          (<code>"startupProbe"</code>, <code>"readinessProbe"</code>, <code>"livenessProbe"</code>) whose
+          <code>httpGet</code> or <code>tcpSocket</code> port is a <strong>name</strong> that no
+          <code>ports[].name</code> in the container defines. Numeric ports are always fine.</p>
+      </div>
+<textarea class="starter">
+def broken_probes(container):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def test_mixed():
+    container = {
+        "name": "app",
+        "ports": [{"containerPort": 9898, "name": "http"}],
+        "startupProbe": {"tcpSocket": {"port": "http"}},
+        "readinessProbe": {"httpGet": {"path": "/readyz", "port": "web"}},
+        "livenessProbe": {"httpGet": {"path": "/healthz", "port": 9898}},
+    }
+    assert broken_probes(container) == ["readinessProbe"]
+
+def test_no_ports():
+    container = {"name": "app", "livenessProbe": {"httpGet": {"port": "http"}}, "readinessProbe": {"exec": {"command": ["true"]}}}
+    assert broken_probes(container) == ["livenessProbe"], "exec probes have no port"
+
+def test_none():
+    assert broken_probes({"name": "app"}) == []
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Collect the named ports into a set first. A port is a name when
+        it's a <code>str</code> that isn't all digits.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">def broken_probes(container):
+    names = {p.get("name") for p in container.get("ports", []) if p.get("name")}
+    broken = []
+    for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+        spec = container.get(probe) or {}
+        for handler in ("httpGet", "tcpSocket"):
+            port = (spec.get(handler) or {}).get("port")
+            if isinstance(port, str) and not port.isdigit() and port not in names:
+                broken.append(probe)
+    return sorted(broken)</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m02-e4" data-title="Harden a container">
+      <div class="exercise-prompt">
+        <p>Write <code>harden(pod)</code> that returns a <strong>new</strong> Pod dict (don't modify the argument)
+          that meets the restricted standard: at Pod level <code>runAsNonRoot: true</code>, <code>runAsUser:
+          10001</code>, and <code>seccompProfile.type: RuntimeDefault</code>; on every container
+          <code>allowPrivilegeEscalation: false</code>, <code>readOnlyRootFilesystem: true</code>, and
+          <code>capabilities.drop: ["ALL"]</code>. Keep any settings that are already there.</p>
+      </div>
+<textarea class="starter">
+import copy
+import kubelab
+
+def harden(pod):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+import kubelab
+
+POD = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "p"}, "spec": {
+    "securityContext": {"fsGroup": 2000},
+    "containers": [{"name": "a", "image": "x:1"}, {"name": "b", "image": "y:1", "securityContext": {"runAsGroup": 3000}}]}}
+
+SECURITY = ("runAsNonRoot", "allowPrivilegeEscalation", "capabilities", "seccompProfile")
+
+def test_no_security_warnings():
+    hardened = harden(POD)
+    left = [w for w in kubelab.warnings(hardened) if any(s in w for s in SECURITY)]
+    assert left == [], left
+
+def test_keeps_existing_and_copies():
+    hardened = harden(POD)
+    assert hardened["spec"]["securityContext"]["fsGroup"] == 2000
+    assert hardened["spec"]["containers"][1]["securityContext"]["runAsGroup"] == 3000
+    assert hardened["spec"]["securityContext"]["runAsUser"] == 10001
+    assert hardened["spec"]["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+    assert "securityContext" not in POD["spec"]["containers"][0], "don't modify the input"
+      </script>
+      <details class="hint"><summary>Hint</summary><p>Start with <code>copy.deepcopy(pod)</code>, then use
+        <code>setdefault("securityContext", {})</code> and <code>update()</code>.</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import copy
+
+def harden(pod):
+    out = copy.deepcopy(pod)
+    spec = out["spec"]
+    spec.setdefault("securityContext", {}).update(
+        {"runAsNonRoot": True, "runAsUser": 10001, "seccompProfile": {"type": "RuntimeDefault"}})
+    for container in spec.get("containers", []):
+        container.setdefault("securityContext", {}).update(
+            {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}})
+    return out</code></pre></details>
+    </div>
+
+    <div class="exercise" data-id="m02-e5" data-title="Triage a namespace">
+      <div class="exercise-prompt">
+        <p>Write <code>triage(pods)</code> that returns a dict counting Pods by diagnosis using
+          <code>kubelab.pod_issue</code>: the issue's <code>reason</code>, or <code>"OK"</code> when it returns
+          <code>None</code>.</p>
+      </div>
+<textarea class="starter">
+import kubelab
+
+def triage(pods):
+    ...
+</textarea>
+      <script type="text/x-python" class="tests">
+def p(**status):
+    return {"status": status}
+
+PODS = [
+    p(phase="Running", containerStatuses=[{"name": "a", "ready": True, "state": {"running": {}}}]),
+    p(phase="Running", containerStatuses=[{"name": "a", "ready": True, "state": {"running": {}}}]),
+    p(phase="Pending", containerStatuses=[{"name": "a", "state": {"waiting": {"reason": "ImagePullBackOff"}}}]),
+    p(phase="Pending", conditions=[{"type": "PodScheduled", "status": "False"}]),
+    p(phase="Running", containerStatuses=[{"name": "a", "ready": False, "state": {"running": {}}}]),
+]
+
+def test_counts():
+    assert triage(PODS) == {"OK": 2, "ImagePullBackOff": 1, "Unschedulable": 1, "NotReady": 1}
+
+def test_empty():
+    assert triage([]) == {}
+      </script>
+      <details class="hint"><summary>Hint</summary><p><code>issue.reason if issue else "OK"</code>, then count with a
+        dict or <code>collections.Counter</code> (convert it back to a plain dict).</p></details>
+      <details class="solution"><summary>Show solution</summary><pre><code class="language-python">import kubelab
+
+def triage(pods):
+    counts = {}
+    for pod in pods:
+        issue = kubelab.pod_issue(pod)
+        key = issue.reason if issue else "OK"
+        counts[key] = counts.get(key, 0) + 1
+    return counts</code></pre></details>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="mini-project">
+    <h2>Labs: a production-shaped Pod, and Pod triage</h2>
+    <div class="project-box">
+      <div class="widget-head"><span class="w-kind">Labs m02-lab1 and m02-lab2</span><span class="w-title">Write a Pod you'd ship, then a tool that explains broken ones</span></div>
+      <div class="widget-body">
+        <p><strong>m02-lab1:</strong> write <code>pod.yaml</code> for podinfo with a named port, all three probes,
+          requests and a memory limit, and the restricted security settings. The checks validate it with kubelab and
+          require that the only lint warning left is "bare Pod". The live check applies it to your cluster and waits
+          for it to become Ready.</p>
+        <p><strong>m02-lab2:</strong> write <code>triage.py</code>, a command-line tool that reads
+          <code>kubectl get pods -o json</code> and prints one line per unhealthy Pod with its reason and the next
+          command to run. No kubelab allowed: in a locked-down environment you'll have only Python and kubectl.</p>
+        <pre data-label="Terminal"><code class="language-bash">pixi run start m02-lab1
+pixi run grade m02-lab1
+pixi run grade-live m02-lab1      # optional: applies pod.yaml to the primer cluster
+pixi run start m02-lab2
+pixi run grade m02-lab2
+kubectl get pods -A -o json | python work/m02-lab2/triage.py</code></pre>
+        <ul class="checklist" data-id="m02-labs">
+          <li><code>pod.yaml</code> passes <code>kubelab.check_object</code></li>
+          <li>Startup, readiness, and liveness probes all use the named port</li>
+          <li>Burstable QoS with modest requests and a memory limit</li>
+          <li>Only the "bare Pod" warning remains</li>
+          <li><code>triage.py</code> reports the root cause for each fixture, OOM before CrashLoop</li>
+          <li>Both <code>pixi run grade</code> commands pass</li>
+        </ul>
+        <p><strong>Stretch:</strong> add a <code>--watch</code> flag to <code>triage.py</code> that re-reads every five
+          seconds from <code>kubectl get pods -o json</code> via <code>subprocess</code>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="quiz">
+    <h2>Quiz</h2>
+    <div class="quiz" data-id="m02-quiz">
+<script type="application/json">
+{"title": "Pods quiz", "passScore": 0.7, "questions": [
+  {"type": "single", "prompt": "Two containers in the same Pod need to talk. Which address do they use?", "options": ["The Service name", "localhost", "The node's IP", "They can't"], "answer": 1, "explanation": "<p>Containers in a Pod share one network namespace, so they reach each other on localhost (on different ports).</p>"},
+  {"type": "single", "prompt": "A readiness probe fails. What happens?", "options": ["The container restarts", "The Pod is removed from Service endpoints until it passes again", "The node is cordoned", "The Pod is deleted"], "answer": 1, "explanation": "<p>Readiness controls traffic only. Liveness failures cause restarts.</p>"},
+  {"type": "single", "prompt": "A slow-booting app keeps being killed during startup. What should you add?", "options": ["A longer readinessProbe", "A startupProbe", "A bigger CPU limit", "<code>restartPolicy: Never</code>"], "answer": 1, "explanation": "<p>Liveness and readiness don't run until the startup probe succeeds, which protects slow boots.</p>"},
+  {"type": "single", "prompt": "Why shouldn't a liveness probe check the database?", "options": ["Probes can't make network calls", "A database outage would restart every replica at once without fixing anything", "It's too slow", "Databases don't support HTTP"], "answer": 1, "explanation": "<p>Restarting your app doesn't fix the database. Liveness should check only whether this process is wedged.</p>"},
+  {"type": "single", "prompt": "A container uses more memory than its <strong>limit</strong>. What happens?", "options": ["It's throttled", "It's OOMKilled (exit code 137)", "Nothing until the node is full", "It's moved to another node"], "answer": 1, "explanation": "<p>Memory isn't compressible. Going over the limit triggers the kernel's OOM killer. Going over a CPU limit only throttles.</p>"},
+  {"type": "single", "prompt": "A Pod's only container has <code>limits: {cpu: 500m, memory: 256Mi}</code> and no requests. What's its QoS class?", "options": ["BestEffort", "Burstable", "Guaranteed"], "answer": 2, "explanation": "<p>Missing requests default to the limits, so requests equal limits for both resources: Guaranteed.</p>"},
+  {"type": "output", "prompt": "What does this print?", "code": "import kubelab\nprint(kubelab.parse_memory('1Ki'))", "answer": "1024", "explanation": "<p><code>Ki</code> is binary (2<sup>10</sup>). <code>1k</code> would be 1000.</p>"},
+  {"type": "single", "prompt": "How do you declare a native sidecar?", "options": ["A container named sidecar", "An init container with <code>restartPolicy: Always</code>", "An annotation", "A second Pod with the same labels"], "answer": 1, "explanation": "<p>Native sidecars start before the app, keep running beside it, and stop after it.</p>"},
+  {"type": "single", "prompt": "<code>runAsNonRoot: true</code> is set and the Pod fails with <code>CreateContainerConfigError</code>. The image says <code>USER app</code>. What's the fix?", "options": ["Remove runAsNonRoot", "Add a numeric <code>runAsUser</code>", "Run as privileged", "Rebuild with <code>USER root</code>"], "answer": 1, "explanation": "<p>The kubelet can't prove a user <em>name</em> isn't root. A numeric UID lets it verify.</p>"},
+  {"type": "multi", "prompt": "Which settings does the <code>restricted</code> Pod Security Standard expect?", "options": ["<code>runAsNonRoot: true</code>", "<code>allowPrivilegeEscalation: false</code>", "<code>capabilities.drop: [ALL]</code>", "<code>seccompProfile.type: RuntimeDefault</code>", "<code>hostNetwork: true</code>"], "answer": [0, 1, 2, 3], "explanation": "<p>Host namespaces are forbidden at restricted (and baseline). The other four are required.</p>"},
+  {"type": "single", "prompt": "A Pod restarts every few seconds. Which command shows why the last attempt died?", "options": ["<code>kubectl logs POD</code>", "<code>kubectl logs POD --previous</code>", "<code>kubectl get events -w</code>", "<code>kubectl top pod</code>"], "answer": 1, "explanation": "<p><code>--previous</code> shows the terminated container's output; the current one may have only just started.</p>"},
+  {"type": "single", "prompt": "Which tool gives you a shell with tools inside a running Pod whose image has no shell?", "options": ["<code>kubectl exec -- bash</code>", "<code>kubectl debug -it POD --image=busybox:1.36 --target=app</code>", "<code>kubectl attach</code>", "<code>docker exec</code> on your Mac"], "answer": 1, "explanation": "<p>An ephemeral debug container brings its own tools and can share the target container's process namespace.</p>"},
+  {"type": "single", "prompt": "Why use named ports in probes (<code>port: http</code>)?", "options": ["Names are faster", "Changing the container port in one place can't silently break the probes", "Probes require names", "Names work across Pods"], "answer": 1, "explanation": "<p>The name resolves to whatever <code>containerPort</code> carries it.</p>"}
+]}
+</script>
+    </div>
+  </section>
+
+  <section class="lesson-section" id="recap">
+    <h2>Recap</h2>
+    <ul>
+      <li>A Pod is containers scheduled together, sharing an IP and volumes. Keep it to one app plus helpers.</li>
+      <li>Phases describe the Pod; states and reasons describe each container. CrashLoopBackOff is a restart
+        back-off, not a cause.</li>
+      <li>Startup protects boots, readiness controls traffic, liveness restarts wedged processes.</li>
+      <li>Requests place Pods; limits cap them; requests and limits together decide the QoS class.</li>
+      <li>Init containers prepare; native sidecars accompany.</li>
+      <li>Write to <code>restricted</code>: non-root with a numeric UID, no escalation, no capabilities, seccomp.</li>
+      <li>Debug top-down: status, describe Events, logs --previous, then exec or debug.</li>
+    </ul>
+    <div class="flashcards" data-title="Pods">
+      <script type="application/json">
+      [{"front": "What containers in a Pod share", "back": "One network namespace (IP, ports, localhost), declared volumes, and a lifecycle."},
+       {"front": "readiness vs liveness", "back": "Readiness: may it get traffic? Failure removes it from endpoints. Liveness: is it wedged? Failure restarts it."},
+       {"front": "startupProbe", "back": "Holds off the other probes until the app has booted."},
+       {"front": "CPU over limit / memory over limit", "back": "CPU: throttled. Memory: OOMKilled (exit 137)."},
+       {"front": "Guaranteed QoS", "back": "Every container sets CPU and memory limits, with requests equal to limits."},
+       {"front": "<code>250m</code> CPU", "back": "A quarter of a core."},
+       {"front": "<code>128Mi</code> vs <code>128M</code>", "back": "Binary 134,217,728 bytes vs decimal 128,000,000 bytes."},
+       {"front": "Native sidecar", "back": "An initContainer with <code>restartPolicy: Always</code>."},
+       {"front": "CrashLoopBackOff", "back": "The kubelet is waiting before restarting a container that keeps exiting. Read <code>logs --previous</code>."},
+       {"front": "runAsNonRoot with USER app", "back": "Fails: add a numeric runAsUser."},
+       {"front": "Shell into a distroless Pod", "back": "<code>kubectl debug -it POD --image=busybox:1.36 --target=CONTAINER</code>"}]
+      </script>
+    </div>
+    <h3>Going further</h3>
+    <ul>
+      <li><a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/">Kubernetes: Pod lifecycle</a></li>
+      <li><a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/">Configure liveness, readiness, and startup probes</a></li>
+      <li><a href="https://kubernetes.io/docs/concepts/security/pod-security-standards/">Pod Security Standards</a></li>
+      <li><a href="https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/">Sidecar containers</a></li>
+      <li>Next: <a href="m03-deployments-and-workloads.html">M03 Deployments and Workloads</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

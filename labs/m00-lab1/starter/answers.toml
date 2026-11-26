@@ -1,0 +1,17 @@
+# Answer each question. Text answers are compared without regard to case or extra spaces.
+
+# Which container runtime runs your Pods' containers inside a kind node?
+pod_runtime = ""
+
+# Which engine runs kind's node containers in this setup?
+node_engine = ""
+
+# The full command that copies the local image app:0.1.0 into every node of the primer cluster.
+load_command = ""
+
+# The CLI you run inside a node (with docker exec) to list the containers containerd is running.
+inspect_cli = ""
+
+# The CPUs and memory (GB) you started Colima with.
+colima_cpus = 0
+colima_memory_gb = 0

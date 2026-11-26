@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kubectl and kind Cheat Sheet · Kubernetes Practicum</title>
+<link rel="stylesheet" href="../assets/css/course.css">
+<script src="../assets/js/curriculum.js"></script>
+<script src="../assets/js/kubelab-src.js"></script>
+<script src="../assets/js/viz.js" defer></script>
+<script src="../assets/js/viz-k8s.js" defer></script>
+<script src="../assets/js/course.js" defer></script>
+</head>
+<body data-root="../" data-page="ref-cheatsheet">
+<main class="lesson">
+  <header class="lesson-hero">
+    <p class="eyebrow">Reference · Cheat sheet</p>
+    <h1>kubectl and kind Cheat Sheet</h1>
+    <p class="lede">The commands, fields, and Pod states from Stage 1 on one page.</p>
+  </header>
+
+  <section class="lesson-section" id="lab">
+    <h2>Your lab</h2>
+    <div class="scroll"><table><thead><tr><th>Task</th><th>Command</th></tr></thead><tbody>
+      <tr><td>Start or stop the VM</td><td><code>colima start --cpu 4 --memory 8 --disk 60 --vm-type vz</code> · <code>colima stop</code></td></tr>
+      <tr><td>Create or delete the cluster</td><td><code>kind create cluster --config kind-primer.yaml</code> · <code>kind delete cluster --name primer</code></td></tr>
+      <tr><td>Load a local image into every node</td><td><code>kind load docker-image NAME:TAG --name primer</code></td></tr>
+      <tr><td>containerd inside a node</td><td><code>docker exec -it primer-worker crictl ps</code> · <code>crictl images</code></td></tr>
+      <tr><td>Fix inotify limits</td><td><code>colima ssh -- sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512</code></td></tr>
+      <tr><td>Labs</td><td><code>pixi run labs</code> · <code>pixi run start ID</code> · <code>pixi run grade ID</code> · <code>pixi run grade-live ID</code></td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section class="lesson-section" id="kubectl">
+    <h2>kubectl</h2>
+    <div class="scroll"><table><thead><tr><th>Task</th><th>Command</th></tr></thead><tbody>
+      <tr><td>Which cluster am I on?</td><td><code>kubectl config current-context</code> · <code>kubectl config use-context kind-primer</code></td></tr>
+      <tr><td>Everything, everywhere</td><td><code>kubectl get all -A</code> · <code>kubectl get pods -A -o wide</code></td></tr>
+      <tr><td>The whole object / one field</td><td><code>kubectl get deploy web -o yaml</code> · <code>-o jsonpath='{.status.readyReplicas}'</code></td></tr>
+      <tr><td>Watch</td><td><code>kubectl get pods -w</code></td></tr>
+      <tr><td>Why is it like this?</td><td><code>kubectl describe pod POD</code> · <code>kubectl get events --sort-by=.lastTimestamp</code></td></tr>
+      <tr><td>Apply declaratively</td><td><code>kubectl diff -f app.yaml</code> · <code>kubectl apply -f app.yaml</code> · <code>kubectl delete -f app.yaml</code></td></tr>
+      <tr><td>Logs</td><td><code>kubectl logs -f POD</code> · <code>--previous</code> · <code>-c CONTAINER</code></td></tr>
+      <tr><td>Get inside</td><td><code>kubectl exec -it POD -- sh</code> · <code>kubectl debug -it POD --image=busybox:1.36 --target=C</code></td></tr>
+      <tr><td>Reach a Pod from your Mac</td><td><code>kubectl port-forward pod/POD 9898:9898</code></td></tr>
+      <tr><td>Throwaway client</td><td><code>kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh</code></td></tr>
+      <tr><td>Schema docs</td><td><code>kubectl explain deployment.spec.strategy</code> · <code>kubectl api-resources</code></td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section class="lesson-section" id="rollouts">
+    <h2>Rollouts</h2>
+    <div class="scroll"><table><thead><tr><th>Task</th><th>Command</th></tr></thead><tbody>
+      <tr><td>New image</td><td><code>kubectl set image deploy/web app=IMAGE:TAG</code></td></tr>
+      <tr><td>Progress</td><td><code>kubectl rollout status deploy/web</code></td></tr>
+      <tr><td>History and undo</td><td><code>kubectl rollout history deploy/web</code> · <code>kubectl rollout undo deploy/web [--to-revision=N]</code></td></tr>
+      <tr><td>Pause, resume, restart</td><td><code>kubectl rollout pause|resume|restart deploy/web</code></td></tr>
+      <tr><td>Scale</td><td><code>kubectl scale deploy/web --replicas=6</code></td></tr>
+      <tr><td>Run a CronJob now</td><td><code>kubectl create job once --from=cronjob/NAME</code></td></tr>
+    </tbody></table></div>
+    <p>Bounds: total ≤ replicas + maxSurge (percent rounds up); ready ≥ replicas − maxUnavailable (percent rounds down).</p>
+  </section>
+
+  <section class="lesson-section" id="states">
+    <h2>Pod states and what to run</h2>
+    <div class="scroll"><table><thead><tr><th>You see</th><th>Usually</th><th>Run</th></tr></thead><tbody>
+      <tr><td><code>Pending</code></td><td>Doesn't fit any node, a taint, or an unbound volume</td><td><code>kubectl describe pod</code> → FailedScheduling</td></tr>
+      <tr><td><code>ErrImagePull</code> / <code>ImagePullBackOff</code></td><td>Wrong name or tag, registry access, or image not loaded into kind</td><td><code>describe</code>; <code>kind load docker-image</code></td></tr>
+      <tr><td><code>CreateContainerConfigError</code></td><td>Missing Secret, ConfigMap, or key; non-numeric USER with runAsNonRoot</td><td><code>describe</code></td></tr>
+      <tr><td><code>CrashLoopBackOff</code></td><td>The process keeps exiting</td><td><code>kubectl logs POD --previous</code></td></tr>
+      <tr><td><code>OOMKilled</code> (exit 137)</td><td>Over the memory limit</td><td><code>kubectl get pod -o yaml</code> → lastState</td></tr>
+      <tr><td>Running, <code>0/1</code> ready</td><td>Readiness probe failing</td><td><code>describe</code> → Readiness probe failed</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section class="lesson-section" id="pod-fields">
+    <h2>Pod fields worth memorising</h2>
+    <pre><code class="language-yaml">spec:
+  securityContext: {runAsNonRoot: true, runAsUser: 10001, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: app
+      image: repo/app:1.2.3                  # pinned tag
+      ports: [{containerPort: 8080, name: http}]
+      startupProbe:   {httpGet: {path: /healthz, port: http}, failureThreshold: 30, periodSeconds: 2}
+      readinessProbe: {httpGet: {path: /readyz,  port: http}}
+      livenessProbe:  {httpGet: {path: /healthz, port: http}}
+      resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 128Mi}}
+      securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}</code></pre>
+  </section>
+</main>
+</body>
+</html>
