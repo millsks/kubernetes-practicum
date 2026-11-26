@@ -247,7 +247,30 @@ page.
 - Jobs require `restartPolicy` OnFailure or Never; CronJob `timeZone` is supported; `concurrencyPolicy` is Allow,
   Forbid, or Replace.
 - The community Ingress NGINX controller was retired in March 2026; teach Gateway API (Traefik in this course) and
-  treat the Ingress API as legacy-but-present. Helm 4 is current (server-side apply by default for new installs).
+  treat the Ingress API as legacy-but-present. Helm 4 is current (server-side apply by default for new installs;
+  `helm list -a` is gone, use `--all`).
+- Installing Traefik (verified on the primer cluster with chart 43.0.0 / Traefik v3.8.0):
+  1. Gateway API CRDs come from upstream, standard channel **v1.7.0**:
+     `kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.7.0/standard-install.yaml`.
+     Traefik 3.8 watches `TCPRoute` and `UDPRoute`, which joined the standard channel in v1.7; with older CRDs the
+     GatewayClass and Gateway stay `Unknown` and the logs say `Cannot list or watch *v1.TCPRoute`. `--server-side` is
+     required (the CRDs are too large for a client-side apply annotation).
+  2. Do **not** install the `traefik/traefik-crds` chart with Helm: with `gatewayAPI=true` its release Secret exceeds
+     the 1 MiB Secret limit (`sh.helm.release.v1... may not be more than 1048576 bytes`). Argo CD is fine either way
+     because it doesn't store Helm releases; in GitOps, point an Application at
+     `github.com/kubernetes-sigs/gateway-api` `config/crd` at tag `v1.7.0`, with prune disabled.
+  3. `helm upgrade --install traefik traefik/traefik -n traefik --create-namespace -f traefik-values.yaml` (no
+     `--skip-crds`; the chart installs Traefik's own CRDs). Values for chart 43:
+     `service.spec.type: NodePort` (not `service.type`, which the schema rejects), `ports.web.nodePort: 30080`,
+     `ports.websecure.expose.default: false`, `providers.kubernetesGateway.enabled: true`,
+     `providers.kubernetesIngress.enabled: true`, and `gateway.name: primer-gw` with
+     `gateway.listeners.web.namespacePolicy: {from: All}`. Keep `gateway.enabled` on: the chart creates the `traefik`
+     GatewayClass only when it also creates the Gateway, so learners don't write a separate Gateway manifest.
+  4. A failed first install can leave unowned `*.traefik.io` CRDs that block later installs ("cannot be imported into
+     the current release"); teach checking for custom resources, then deleting them.
+- Pin every chart version in labs and in Argo CD (`--version`, `targetRevision`); never `"*"`.
+- Lab steps that apply a file must say to save it first (`cat > route.yaml <<'EOF'`), and avoid `{ ... }` blocks and
+  one-line `for ...; do ...; done` loops in copy-paste commands: zsh's paste handling can escape the `;`.
 
 When in doubt, check the current docs at https://kubernetes.io/docs and link them from "Going further".
 
